@@ -477,7 +477,7 @@ export class MadaraAdapter {
         return pages;
     }
     extractCardTitle(html, match, rawSlug) {
-        const inlineText = decodeHtmlEntities((match[3] || '').replace(/<[^>]+>/g, '').trim());
+        const inlineText = stripHtml(match[3] || '').replace(/[<>]/g, '').trim();
         if (inlineText && inlineText.toLowerCase() !== 'feed' && !/^(?:design[_\s-]*sem[_\s-]*nome)$/i.test(inlineText)) {
             return inlineText;
         }

@@ -535,7 +535,7 @@ export class MadaraAdapter implements SourceAdapter {
   }
 
   private extractCardTitle(html: string, match: RegExpExecArray, rawSlug: string): string {
-    const inlineText = decodeHtmlEntities((match[3] || '').replace(/<[^>]+>/g, '').trim());
+    const inlineText = stripHtml(match[3] || '').replace(/[<>]/g, '').trim();
     if (inlineText && inlineText.toLowerCase() !== 'feed' && !/^(?:design[_\s-]*sem[_\s-]*nome)$/i.test(inlineText)) {
       return inlineText;
     }
