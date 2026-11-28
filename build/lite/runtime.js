@@ -400,6 +400,8 @@ export class ImporterLiteRuntime {
     // timestamp of the last completed one so the compact heartbeat is explicit
     // about how fresh those optional diagnostics are while chapters are busy.
     lastFullOperationalSnapshotAt = null;
+    lastP1FocusLogSignature = '';
+    lastP1FocusLogAt = 0;
     // A full operational snapshot includes optional aggregate diagnostics. It
     // must never overlap itself when the shared two-connection pool is slow:
     // concurrent timer turns otherwise amplify the very YSQL wait they report.
@@ -1577,6 +1579,25 @@ export class ImporterLiteRuntime {
             if (snap?.focusSources && typeof this.executor.mergeFairSourceDemandCounts === 'function') {
                 this.executor.mergeFairSourceDemandCounts(snap.focusSources);
             }
+            if (snap) {
+                const sig = `${snap.targetSize}:${snap.focusWorkKeys.join(',')}`;
+                const nowLog = Date.now();
+                if (sig !== this.lastP1FocusLogSignature || nowLog - this.lastP1FocusLogAt >= 300_000) {
+                    this.lastP1FocusLogSignature = sig;
+                    this.lastP1FocusLogAt = nowLog;
+                    this.logger.info('P1_FOCUS_COHORT_UPDATED', {
+                        targetSize: snap.targetSize,
+                        focusWorkCount: snap.focusWorkCount,
+                        deficitSlots: snap.deficitSlots ?? Math.max(0, snap.targetSize - snap.focusWorkCount),
+                        focusSources: snap.focusSources,
+                        focusKinds: snap.focusKinds,
+                        focusContentRatings: snap.focusContentRatings,
+                        focusGenres: snap.focusGenres,
+                        focusPopularityTiers: snap.focusPopularityTiers,
+                        completedWorksSinceBoot: snap.completedWorksSinceBoot,
+                    });
+                }
+            }
         })
             .catch((error) => {
             this.logger.warn('P1 focus group refresh deferred', { error: error?.message });
@@ -2137,7 +2158,9 @@ export class ImporterLiteRuntime {
             return;
         this.pendingImmediateCoverVisionWorkIds.add(workId);
         if (process.env.NODE_ENV !== 'test') {
-            void this.runCoverVisionTurn();
+            void this.runCoverVisionTurn().catch((err) => {
+                this.logger.warn('Async cover vision turn failed non-fatally', { error: err?.message || String(err) });
+            });
         }
     }
     /**
@@ -2280,6 +2303,12 @@ export class ImporterLiteRuntime {
             this.coverVisionTelemetry.lastRunAt = new Date().toISOString();
             this.coverVisionTelemetry.lastOutcome = `PROCESSED_${tasks.length}_PROMOTED_${promotedCount}`;
             return promotedCount;
+        }
+        catch (turnErr) {
+            this.coverVisionTelemetry.lastRunAt = new Date().toISOString();
+            this.coverVisionTelemetry.lastOutcome = `ERROR:${turnErr?.message || 'unknown'}`;
+            this.logger.warn('Cover vision turn skipped non-fatally', { error: turnErr?.message || String(turnErr) });
+            return 0;
         }
         finally {
             this.coverVisionGate.release();
@@ -2624,9 +2653,16 @@ export class ImporterLiteRuntime {
         if (typeof this.queue.hasExecutableOrRecoverableP1Backlog === 'function') {
             try {
                 const p1Backlog = await this.queue.hasExecutableOrRecoverableP1Backlog();
+                const focusSnap = typeof this.queue.getP1FocusGroupSnapshot === 'function'
+                    ? this.queue.getP1FocusGroupSnapshot()
+                    : null;
+                const p1Deficit = focusSnap?.refreshedAt
+                    ? Math.max(0, (focusSnap.targetSize || 10) - (focusSnap.focusWorkCount || 0))
+                    : 0;
+                const allowDeficitReplenishment = p1Backlog.pending && p1Deficit > 0;
                 this.p2SubordinationState = {
-                    subordinated: p1Backlog.pending,
-                    reason: p1Backlog.reason,
+                    subordinated: p1Backlog.pending && !allowDeficitReplenishment,
+                    reason: allowDeficitReplenishment ? `P1_DEFICIT_REPLENISHMENT:${p1Deficit}` : p1Backlog.reason,
                     checkedAt: new Date().toISOString(),
                 };
             }
@@ -2635,8 +2671,8 @@ export class ImporterLiteRuntime {
             }
         }
         if (this.p2SubordinationState.subordinated) {
-            // V3.0 Contract F & Regra 9: When P1 has any executable work (PAUSED_P1_BUSY),
-            // normal P2 discovery and new-work batch creation stay strictly paused — even under pool pressure.
+            // V3.0 Contract F & Regra 9: When P1 cohort is filled and has executable work (PAUSED_P1_BUSY),
+            // normal P2 discovery and new-work batch creation stay paused — opening only for P1 deficit replenishment.
             return;
         }
         if (!this.newWorkCatalogGate.tryAcquire()) {
@@ -4052,17 +4088,32 @@ export class ImporterLiteRuntime {
             const p1Backlog = typeof this.queue.hasExecutableOrRecoverableP1Backlog === 'function'
                 ? await this.queue.hasExecutableOrRecoverableP1Backlog()
                 : { pending: false, reason: null };
+            const focusSnap = typeof this.queue.getP1FocusGroupSnapshot === 'function'
+                ? this.queue.getP1FocusGroupSnapshot()
+                : null;
+            const p1Deficit = focusSnap?.refreshedAt
+                ? Math.max(0, (focusSnap.targetSize || 10) - (focusSnap.focusWorkCount || 0))
+                : 0;
+            const allowDeficitReplenishment = p1Backlog.pending && p1Deficit > 0;
             this.p2SubordinationState = {
-                subordinated: p1Backlog.pending,
-                reason: p1Backlog.reason,
+                subordinated: p1Backlog.pending && !allowDeficitReplenishment,
+                reason: allowDeficitReplenishment ? `P1_DEFICIT_REPLENISHMENT:${p1Deficit}` : p1Backlog.reason,
                 checkedAt: new Date().toISOString(),
             };
             const catalogInputs = [];
+            let newUnmappedEnqueued = 0;
+            const maxNewUnmappedPerDeficit = Math.min(10, p1Deficit);
             for (const work of candidateWorks) {
                 const mappedWorkId = existingMappings.get(String(work.sourceWorkId));
-                if (this.p2SubordinationState.subordinated && !mappedWorkId) {
-                    // Strict PAUSED_P1_BUSY invariant: never admit unmapped new P2 works while P1 has executable backlog
-                    continue;
+                if (!mappedWorkId) {
+                    if (this.p2SubordinationState.subordinated) {
+                        // Strict PAUSED_P1_BUSY invariant when cohort is filled: never admit unmapped new P2 works.
+                        continue;
+                    }
+                    if (allowDeficitReplenishment && newUnmappedEnqueued >= maxNewUnmappedPerDeficit) {
+                        continue;
+                    }
+                    newUnmappedEnqueued++;
                 }
                 catalogInputs.push({
                     taskType: 'CATALOG',

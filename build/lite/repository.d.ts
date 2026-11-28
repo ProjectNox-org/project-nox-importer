@@ -92,12 +92,21 @@ export interface P1FocusWorkEntry {
     source: string;
     remainingChapters: number;
     enteredAt: number;
+    kind?: string;
+    contentRating?: string;
+    genres?: string[];
+    popularityTier?: 'HIGH' | 'MID' | 'TAIL';
 }
 export interface P1FocusGroupSnapshot {
     targetSize: number;
     focusWorkCount: number;
     focusWorkKeys: string[];
     focusSources: Record<string, number>;
+    focusKinds?: Record<string, number>;
+    focusContentRatings?: Record<string, number>;
+    focusGenres?: Record<string, number>;
+    focusPopularityTiers?: Record<string, number>;
+    deficitSlots?: number;
     primaryClaims: number;
     secondaryClaims: number;
     completedWorksSinceBoot: number;

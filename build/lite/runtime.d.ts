@@ -122,6 +122,8 @@ export declare class ImporterLiteRuntime {
     private heartbeatStartedAt;
     private heartbeatCompletedAt;
     private lastFullOperationalSnapshotAt;
+    private lastP1FocusLogSignature;
+    private lastP1FocusLogAt;
     private operationalSnapshotRunning;
     private readonly workerLiveness;
     private sitePausedUntil;

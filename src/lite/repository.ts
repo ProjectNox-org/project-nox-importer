@@ -197,6 +197,10 @@ export interface P1FocusWorkEntry {
   source: string;
   remainingChapters: number;
   enteredAt: number;
+  kind?: string;
+  contentRating?: string;
+  genres?: string[];
+  popularityTier?: 'HIGH' | 'MID' | 'TAIL';
 }
 
 export interface P1FocusGroupSnapshot {
@@ -204,6 +208,11 @@ export interface P1FocusGroupSnapshot {
   focusWorkCount: number;
   focusWorkKeys: string[];
   focusSources: Record<string, number>;
+  focusKinds?: Record<string, number>;
+  focusContentRatings?: Record<string, number>;
+  focusGenres?: Record<string, number>;
+  focusPopularityTiers?: Record<string, number>;
+  deficitSlots?: number;
   primaryClaims: number;
   secondaryClaims: number;
   completedWorksSinceBoot: number;
@@ -230,7 +239,7 @@ export class LiteRepository {
   private readonly coolingSources = new Map<string, { until: number; rateLimited: boolean }>();
   private p1FocusWorkKeys: string[] = [];
   private p1FocusMeta = new Map<string, P1FocusWorkEntry>();
-  private p1FocusTargetSize = 18;
+  private p1FocusTargetSize = 10;
   private p1FocusRefreshedAt: string | null = null;
   private p1CompletedWorksCount = 0;
   private p1CompletedWorkIds: string[] = [];
@@ -2010,13 +2019,34 @@ export class LiteRepository {
         ws.oldest_task_at,
         rs.runnable_sources,
         rs.healthy_runnable_sources,
-        COALESCE(rs.has_recorded_routes, false) AS has_recorded_routes
+        COALESCE(rs.has_recorded_routes, false) AS has_recorded_routes,
+        COALESCE(w.kind, 'MANHWA') AS work_kind,
+        COALESCE(w.content_rating, 'GENERAL') AS content_rating,
+        COALESCE(w.views_total, 0) AS views_total,
+        COALESCE(wt_agg.genres, '{}'::text[]) AS genres
       FROM work_stats ws
       LEFT JOIN route_stats rs ON rs.work_key = ws.work_key
+      LEFT JOIN works w ON w.id = ws.work_id
+      LEFT JOIN LATERAL (
+        SELECT array_agg(tg.slug ORDER BY tg.slug) AS genres
+        FROM (
+          SELECT tg.slug
+          FROM work_tags wt
+          JOIN tags tg ON tg.id = wt.tag_id
+          WHERE wt.work_id = ws.work_id
+          ORDER BY tg.slug
+          LIMIT 5
+        ) tg
+      ) wt_agg ON true
       WHERE ws.remaining_chapters > 0
     `, [horizonIso, currentFocusKeys]);
 
     const now = Date.now();
+    const classifyPopularity = (viewsTotal: number): 'HIGH' | 'MID' | 'TAIL' => {
+      if (viewsTotal >= 1000) return 'HIGH';
+      if (viewsTotal >= 100) return 'MID';
+      return 'TAIL';
+    };
     const candidateByKey = new Map<string, {
       workKey: string;
       workId: string;
@@ -2024,7 +2054,12 @@ export class LiteRepository {
       isDegraded: boolean;
       remainingChapters: number;
       oldestTaskMs: number;
+      kind: string;
+      contentRating: string;
+      genres: string[];
+      popularityTier: 'HIGH' | 'MID' | 'TAIL';
       score: number;
+      jitter: number;
     }>();
 
     for (const row of candidatesRes.rows) {
@@ -2057,6 +2092,12 @@ export class LiteRepository {
       const speedBonus = isDegraded
         ? -25
         : (sourceTiers ? (speedRankFor(source) === 0 ? 22 : speedRankFor(source) === 2 ? -12 : 0) : 0);
+      const workKind = String(row.work_kind || 'MANHWA').toUpperCase();
+      const contentRating = String(row.content_rating || 'GENERAL').toUpperCase();
+      const viewsTotal = Number(row.views_total || 0);
+      const genres = Array.isArray(row.genres)
+        ? row.genres.map((g: unknown) => String(g || '').trim()).filter(Boolean)
+        : [];
       candidateByKey.set(String(row.work_key), {
         workKey: String(row.work_key),
         workId: String(row.work_id),
@@ -2064,7 +2105,12 @@ export class LiteRepository {
         isDegraded,
         remainingChapters: remaining,
         oldestTaskMs: oldestMs,
+        kind: workKind,
+        contentRating,
+        genres,
+        popularityTier: classifyPopularity(viewsTotal),
         score: completionScore + fairnessScore + speedBonus,
+        jitter: Math.random() * 14,
       });
     }
 
@@ -2095,40 +2141,54 @@ export class LiteRepository {
     const nextFocus: P1FocusWorkEntry[] = [];
     const selectedSet = new Set<string>();
     const sourceCounts = new Map<string, number>();
+    const kindCounts = new Map<string, number>();
+    const ratingCounts = new Map<string, number>();
+    const genreCounts = new Map<string, number>();
+    const popularityCounts = new Map<string, number>();
     let totalSlowCount = 0;
 
-    // 1. Keep sticky Focus works that remain runnable so works drain continuously
-    //    to completion without thrashing every chapter.
+    const recordSelectedTaxonomy = (cand: {
+      source: string;
+      isDegraded: boolean;
+      kind: string;
+      contentRating: string;
+      genres: string[];
+      popularityTier: 'HIGH' | 'MID' | 'TAIL';
+    }) => {
+      sourceCounts.set(cand.source, (sourceCounts.get(cand.source) || 0) + 1);
+      kindCounts.set(cand.kind, (kindCounts.get(cand.kind) || 0) + 1);
+      ratingCounts.set(cand.contentRating, (ratingCounts.get(cand.contentRating) || 0) + 1);
+      popularityCounts.set(cand.popularityTier, (popularityCounts.get(cand.popularityTier) || 0) + 1);
+      for (const g of cand.genres) {
+        genreCounts.set(g, (genreCounts.get(g) || 0) + 1);
+      }
+      if ((sourceTiers && speedRankFor(cand.source) === 2) || cand.isDegraded) totalSlowCount++;
+    };
+
+    // 1. Strict Slot Stability: keep active Focus works until their known chapters complete
+    //    or all executable routes become genuinely blocked (zero premature abandonment).
     for (const prevKey of this.p1FocusWorkKeys) {
       if (nextFocus.length >= desiredSize) break;
       const cand = candidateByKey.get(prevKey);
       if (!cand) continue;
       const prevMeta = this.p1FocusMeta.get(prevKey);
       const enteredAt = prevMeta?.enteredAt || now;
-      const isSlow = Boolean((sourceTiers && speedRankFor(cand.source) === 2) || cand.isDegraded);
-      const stickyRotateMs = isSlow ? 12 * 60_000 : 25 * 60_000;
-      const stickyRemainingThreshold = isSlow ? 25 : 35;
-      // Rotate out long backlogs only when fresher near-done alternatives wait.
-      // Works close to completion (<= 15 chapters remaining) remain sticky until finished.
-      if (cand.remainingChapters > 15 && now - enteredAt > stickyRotateMs && cand.remainingChapters > stickyRemainingThreshold && candidateByKey.size > desiredSize) {
-        continue;
-      }
-      if (isSlow && totalSlowCount >= maxTotalSlowInFocus) continue;
-      const currentSourceCount = sourceCounts.get(cand.source) || 0;
-      if (currentSourceCount >= maxForSource(cand.source)) continue;
       selectedSet.add(prevKey);
-      sourceCounts.set(cand.source, currentSourceCount + 1);
-      if (isSlow) totalSlowCount++;
+      recordSelectedTaxonomy(cand);
       nextFocus.push({
         workKey: cand.workKey,
         workId: cand.workId,
         source: cand.source,
         remainingChapters: cand.remainingChapters,
         enteredAt,
+        kind: cand.kind,
+        contentRating: cand.contentRating,
+        genres: cand.genres,
+        popularityTier: cand.popularityTier,
       });
     }
 
-    // 2. Fill remaining Focus slots favoring fast throughput + unrepresented sources + completion potential + age fairness.
+    // 2. Fill open Focus slots favoring multi-source, genre, kind, content-rating & popularity diversity + randomness.
     const remainingCandidates = [...candidateByKey.values()].filter((c) => !selectedSet.has(c.workKey));
     while (nextFocus.length < desiredSize && remainingCandidates.length > 0) {
       let bestIdx = -1;
@@ -2139,8 +2199,20 @@ export class LiteRepository {
         if (isSlow && totalSlowCount >= maxTotalSlowInFocus) continue;
         const srcCount = sourceCounts.get(cand.source) || 0;
         if (srcCount >= maxForSource(cand.source)) continue;
-        const diversityBonus = srcCount === 0 ? 25 : srcCount === 1 ? 10 : 0;
-        const effectiveScore = cand.score + diversityBonus;
+        const srcDiversityBonus = srcCount === 0 ? 25 : srcCount === 1 ? 10 : 0;
+        const kindDiversityBonus = (kindCounts.get(cand.kind) || 0) === 0 ? 20 : (kindCounts.get(cand.kind) || 0) === 1 ? 6 : 0;
+        const ratingDiversityBonus = (ratingCounts.get(cand.contentRating) || 0) === 0 ? 18 : 0;
+        const unseenGenreCount = cand.genres.filter((g) => (genreCounts.get(g) || 0) === 0).length;
+        const genreDiversityBonus = unseenGenreCount > 0 ? Math.min(26, 16 + (unseenGenreCount - 1) * 4) : 0;
+        const popDiversityBonus = (popularityCounts.get(cand.popularityTier) || 0) === 0 ? 12 : 0;
+        const effectiveScore =
+          cand.score +
+          srcDiversityBonus +
+          kindDiversityBonus +
+          ratingDiversityBonus +
+          genreDiversityBonus +
+          popDiversityBonus +
+          cand.jitter;
         if (effectiveScore > bestScore) {
           bestScore = effectiveScore;
           bestIdx = i;
@@ -2149,14 +2221,17 @@ export class LiteRepository {
       if (bestIdx === -1) break;
       const chosen = remainingCandidates.splice(bestIdx, 1)[0];
       selectedSet.add(chosen.workKey);
-      sourceCounts.set(chosen.source, (sourceCounts.get(chosen.source) || 0) + 1);
-      if ((sourceTiers && speedRankFor(chosen.source) === 2) || chosen.isDegraded) totalSlowCount++;
+      recordSelectedTaxonomy(chosen);
       nextFocus.push({
         workKey: chosen.workKey,
         workId: chosen.workId,
         source: chosen.source,
         remainingChapters: chosen.remainingChapters,
         enteredAt: now,
+        kind: chosen.kind,
+        contentRating: chosen.contentRating,
+        genres: chosen.genres,
+        popularityTier: chosen.popularityTier,
       });
     }
 
@@ -2173,7 +2248,8 @@ export class LiteRepository {
           const isSlow = Boolean((sourceTiers && speedRankFor(cand.source) === 2) || cand.isDegraded);
           if (isSlow) continue;
           const count = sourceCounts.get(cand.source) || 0;
-          const effectiveScore = cand.score - count * 4;
+          const genreBonus = cand.genres.some((g) => (genreCounts.get(g) || 0) === 0) ? 8 : 0;
+          const effectiveScore = cand.score + genreBonus + cand.jitter - count * 4;
           if (
             effectiveScore > bestEffectiveScore
             || (effectiveScore === bestEffectiveScore && bestIdx >= 0 && cand.oldestTaskMs < remainingCandidates[bestIdx].oldestTaskMs)
@@ -2185,31 +2261,38 @@ export class LiteRepository {
         if (bestIdx === -1) break;
         const chosen = remainingCandidates.splice(bestIdx, 1)[0];
         selectedSet.add(chosen.workKey);
-        sourceCounts.set(chosen.source, (sourceCounts.get(chosen.source) || 0) + 1);
+        recordSelectedTaxonomy(chosen);
         nextFocus.push({
           workKey: chosen.workKey,
           workId: chosen.workId,
           source: chosen.source,
           remainingChapters: chosen.remainingChapters,
           enteredAt: now,
+          kind: chosen.kind,
+          contentRating: chosen.contentRating,
+          genres: chosen.genres,
+          popularityTier: chosen.popularityTier,
         });
       }
       if (nextFocus.length < desiredSize) {
-        remainingCandidates.sort((a, b) => b.score - a.score || a.oldestTaskMs - b.oldestTaskMs);
+        remainingCandidates.sort((a, b) => (b.score + b.jitter) - (a.score + a.jitter) || a.oldestTaskMs - b.oldestTaskMs);
         for (const chosen of remainingCandidates) {
           if (nextFocus.length >= desiredSize) break;
           if (selectedSet.has(chosen.workKey)) continue;
           const isSlow = Boolean(sourceTiers && speedRankFor(chosen.source) === 2);
           if (isSlow && totalSlowCount >= maxTotalSlowInFocus && nextFocus.length > 0) continue;
           selectedSet.add(chosen.workKey);
-          sourceCounts.set(chosen.source, (sourceCounts.get(chosen.source) || 0) + 1);
-          if (isSlow) totalSlowCount++;
+          recordSelectedTaxonomy(chosen);
           nextFocus.push({
             workKey: chosen.workKey,
             workId: chosen.workId,
             source: chosen.source,
             remainingChapters: chosen.remainingChapters,
             enteredAt: now,
+            kind: chosen.kind,
+            contentRating: chosen.contentRating,
+            genres: chosen.genres,
+            popularityTier: chosen.popularityTier,
           });
         }
       }
@@ -2229,14 +2312,29 @@ export class LiteRepository {
 
   getP1FocusGroupSnapshot(): P1FocusGroupSnapshot {
     const focusSources: Record<string, number> = {};
+    const focusKinds: Record<string, number> = {};
+    const focusContentRatings: Record<string, number> = {};
+    const focusGenres: Record<string, number> = {};
+    const focusPopularityTiers: Record<string, number> = {};
     for (const entry of this.p1FocusMeta.values()) {
       focusSources[entry.source] = (focusSources[entry.source] || 0) + 1;
+      if (entry.kind) focusKinds[entry.kind] = (focusKinds[entry.kind] || 0) + 1;
+      if (entry.contentRating) focusContentRatings[entry.contentRating] = (focusContentRatings[entry.contentRating] || 0) + 1;
+      if (entry.popularityTier) focusPopularityTiers[entry.popularityTier] = (focusPopularityTiers[entry.popularityTier] || 0) + 1;
+      for (const g of entry.genres || []) {
+        focusGenres[g] = (focusGenres[g] || 0) + 1;
+      }
     }
     return {
       targetSize: this.p1FocusTargetSize,
       focusWorkCount: this.p1FocusWorkKeys.length,
       focusWorkKeys: [...this.p1FocusWorkKeys],
       focusSources,
+      focusKinds,
+      focusContentRatings,
+      focusGenres,
+      focusPopularityTiers,
+      deficitSlots: Math.max(0, this.p1FocusTargetSize - this.p1FocusWorkKeys.length),
       primaryClaims: this.p1PrimaryClaims,
       secondaryClaims: this.p1SecondaryClaims,
       completedWorksSinceBoot: this.p1CompletedWorksCount,

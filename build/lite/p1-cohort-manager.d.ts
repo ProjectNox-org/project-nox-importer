@@ -11,7 +11,20 @@
  * - Authenticated & auditable STAFF onboarding remains an isolated exception (priority STAFF < P0).
  */
 import { type WorkDemandSignals } from './demand-scorer.js';
-export type P2GateState = 'PAUSED_P1_BUSY' | 'ELIGIBLE_P1_EMPTY' | 'ELIGIBLE_P1_ALL_BLOCKED';
+export type P2GateState = 'PAUSED_P1_BUSY' | 'ELIGIBLE_P1_DEFICIT' | 'ELIGIBLE_P1_EMPTY' | 'ELIGIBLE_P1_ALL_BLOCKED';
+export interface P2ReplenishmentPlan {
+    targetSize: number;
+    activeCohortSize: number;
+    executableBacklogWorks: number;
+    deficit: number;
+    shouldRequestP2: boolean;
+    mode: 'NONE' | 'DEFICIT_REPLENISHMENT' | 'FULL_BATCH';
+}
+export interface P1CohortControllerOptions {
+    enableDeficitReplenishment?: boolean;
+    enableDiversity?: boolean;
+    randomFn?: () => number;
+}
 export interface P1CohortBottleneckMetrics {
     rssMiB?: number;
     dbPoolWaitMs?: number;
@@ -37,6 +50,10 @@ export declare class P1CohortAndP2GateController {
     private targetSize;
     private p2GateState;
     private readonly staffAuditLog;
+    private readonly enableDeficitReplenishment;
+    private readonly enableDiversity;
+    private readonly randomFn?;
+    constructor(options?: P1CohortControllerOptions);
     seedWorks(initial: readonly P1WorkState[]): void;
     getTargetSize(): number;
     getActiveCohortIds(): string[];
@@ -48,6 +65,7 @@ export declare class P1CohortAndP2GateController {
         workKey: string;
         at: string;
     }[];
+    getP2ReplenishmentPlan(): P2ReplenishmentPlan;
     reconcile(bottleneck?: P1CohortBottleneckMetrics): {
         cohortIds: string[];
         targetSize: number;
@@ -63,6 +81,18 @@ export declare class P1CohortAndP2GateController {
     /** Atomic gate for normal P2 new-work batch creation (max 10, paused immediately after enqueueing into P0+P1). */
     tryAdmitNormalP2Batch(newWorks: readonly P1WorkState[], maxBatchSize?: number): {
         admitted: boolean;
+        gateState: P2GateState;
+        enrolledWorkIds: string[];
+        reason: string;
+    };
+    /**
+     * Explicit P1->P2 deficit replenishment: requests only the missing slots needed to fill the target
+     * cohort (e.g., 3 executable works for a 10-work cohort requests 7 from P2) without pausing/interrupting
+     * the 3 works already in progress, preventing circular loops via idempotent membership check.
+     */
+    tryAdmitDeficitP2Batch(newWorks: readonly P1WorkState[], maxBatchSize?: number): {
+        admitted: boolean;
+        requestedDeficit: number;
         gateState: P2GateState;
         enrolledWorkIds: string[];
         reason: string;

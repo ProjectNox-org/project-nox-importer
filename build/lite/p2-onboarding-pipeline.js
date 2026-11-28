@@ -10,6 +10,7 @@ import crypto from 'node:crypto';
 import { computeMergedWorkAliases } from '../alias-sources/identity-verifier.js';
 import { isProtectedEditorialProvenance, isPtBrTitle } from '../core/ptbr-title-localization.js';
 import { processAndStoreMedia } from '../storage/media.js';
+import { classifyPopularityTier } from './demand-scorer.js';
 export class InMemoryP2OnboardingPersistence {
     checkpoints = new Map();
     works = new Map();
@@ -168,6 +169,61 @@ export class InMemoryP2OnboardingPersistence {
         return { updatedFields, preservedManualFields, skippedLockBusy: false };
     }
 }
+export function selectDiverseP2Candidates(candidates, limit, options = {}) {
+    const targetCount = Math.max(0, Math.floor(limit));
+    if (targetCount === 0 || candidates.length === 0)
+        return [];
+    const randomFn = options.randomFn ?? Math.random;
+    const sourceCounts = new Map(Object.entries(options.existingFocusMix?.sources || {}));
+    const genreCounts = new Map(Object.entries(options.existingFocusMix?.genres || {}));
+    const kindCounts = new Map(Object.entries(options.existingFocusMix?.kinds || {}));
+    const ratingCounts = new Map(Object.entries(options.existingFocusMix?.contentRatings || {}));
+    const popCounts = new Map();
+    const bump = (map, key) => {
+        const k = String(key || '').trim().toLowerCase();
+        if (k)
+            map.set(k, (map.get(k) ?? 0) + 1);
+    };
+    const inferSource = (c) => c.primarySource || c.mainSources.find((m) => m.status === 'OK')?.sourceId || 'unknown';
+    const inferGenres = (c) => c.genres && c.genres.length > 0 ? c.genres : (c.mainSources.find((m) => m.genres?.length)?.genres || []);
+    const pool = candidates.map((cand) => ({ cand, jitter: randomFn() * 14 }));
+    const chosen = [];
+    while (chosen.length < targetCount && pool.length > 0) {
+        let bestIdx = 0;
+        let bestScore = -Infinity;
+        for (let i = 0; i < pool.length; i++) {
+            const { cand, jitter } = pool[i];
+            const src = inferSource(cand).toLowerCase();
+            const genres = inferGenres(cand).map((g) => g.toLowerCase());
+            const kind = String(cand.kind || 'MANHWA').toLowerCase();
+            const rating = String(cand.contentRating || 'GENERAL').toLowerCase();
+            const pop = classifyPopularityTier(cand.demandSignals?.views7d ?? 50, cand.demandSignals?.views30d ?? 100);
+            let score = jitter;
+            const srcCount = sourceCounts.get(src) ?? 0;
+            score += srcCount === 0 ? 28 : srcCount === 1 ? 10 : -srcCount * 5;
+            if (genres.some((g) => (genreCounts.get(g) ?? 0) === 0))
+                score += 20;
+            const kCount = kindCounts.get(kind) ?? 0;
+            score += kCount === 0 ? 18 : 0;
+            const rCount = ratingCounts.get(rating) ?? 0;
+            score += rCount === 0 ? 18 : 0;
+            score += (popCounts.get(pop) ?? 0) === 0 ? 12 : 0;
+            if (score > bestScore) {
+                bestScore = score;
+                bestIdx = i;
+            }
+        }
+        const picked = pool.splice(bestIdx, 1)[0].cand;
+        chosen.push(picked);
+        bump(sourceCounts, inferSource(picked));
+        for (const g of inferGenres(picked))
+            bump(genreCounts, g);
+        bump(kindCounts, picked.kind || 'MANHWA');
+        bump(ratingCounts, picked.contentRating || 'GENERAL');
+        bump(popCounts, classifyPopularityTier(picked.demandSignals?.views7d ?? 50, picked.demandSignals?.views30d ?? 100));
+    }
+    return chosen;
+}
 export class P2OnboardingPipeline {
     consolidator;
     persistence;
@@ -182,9 +238,12 @@ export class P2OnboardingPipeline {
         this.p0Scanner = p0Scanner;
     }
     async runControlledBatch(candidates, options = {}) {
+        let effectiveCap = Math.min(10, Math.max(1, options.maxBatchSize ?? 10));
         if (!options.staffBypassAuth) {
             const snap = this.gateController.reconcile();
-            if (snap.p2GateState === 'PAUSED_P1_BUSY') {
+            const plan = this.gateController.getP2ReplenishmentPlan();
+            const deficitAllowed = Boolean(options.allowDeficitReplenishment) && plan.deficit > 0;
+            if (snap.p2GateState === 'PAUSED_P1_BUSY' && !deficitAllowed) {
                 return {
                     admitted: false,
                     gateStateAfter: 'PAUSED_P1_BUSY',
@@ -196,8 +255,13 @@ export class P2OnboardingPipeline {
                     reason: 'PAUSED_P1_BUSY: P1 has executable work; normal P2 batch blocked',
                 };
             }
+            if (deficitAllowed && (snap.p2GateState === 'ELIGIBLE_P1_DEFICIT' || snap.p2GateState === 'PAUSED_P1_BUSY')) {
+                effectiveCap = Math.min(effectiveCap, plan.deficit);
+            }
         }
-        const batch = candidates.slice(0, 10);
+        const batch = options.diversifySelection
+            ? selectDiverseP2Candidates(candidates, effectiveCap, { randomFn: options.randomFn })
+            : candidates.slice(0, effectiveCap);
         const createdWorkIds = [];
         const mergedWorkIds = [];
         const pendingReviewKeys = [];
@@ -352,6 +416,12 @@ export class P2OnboardingPipeline {
             });
             // Enroll immediately into P0 monitoring + P1 completion queue
             const pendingChapters = Math.max(1, cand.initialPendingChapters ?? 1);
+            const enrollGenres = cand.genres && cand.genres.length > 0
+                ? cand.genres
+                : consolidated.consolidatedPayload.genres;
+            const enrollSource = cand.primarySource
+                || consolidated.consolidatedPayload.mappings[0]?.source
+                || null;
             worksToEnrollInP1.push({
                 workId: committed.workId,
                 views24h: cand.demandSignals?.views24h ?? 10,
@@ -366,6 +436,10 @@ export class P2OnboardingPipeline {
                 executableChapters: pendingChapters,
                 runningChapters: 0,
                 externallyBlocked: false,
+                kind: cand.kind ?? null,
+                contentRating: cand.contentRating ?? null,
+                genres: enrollGenres,
+                primarySource: enrollSource,
             });
             if (this.p0Scanner) {
                 const p0Work = {
@@ -385,8 +459,12 @@ export class P2OnboardingPipeline {
                 }
                 gateStateAfter = this.gateController.reconcile().p2GateState;
             }
+            else if (options.allowDeficitReplenishment) {
+                const admission = this.gateController.tryAdmitDeficitP2Batch(worksToEnrollInP1, effectiveCap);
+                gateStateAfter = admission.gateState;
+            }
             else {
-                const admission = this.gateController.tryAdmitNormalP2Batch(worksToEnrollInP1, 10);
+                const admission = this.gateController.tryAdmitNormalP2Batch(worksToEnrollInP1, effectiveCap);
                 gateStateAfter = admission.gateState;
             }
         }

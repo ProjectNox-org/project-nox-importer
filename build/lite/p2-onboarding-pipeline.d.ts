@@ -142,6 +142,10 @@ export interface P2BatchCandidateInput {
     mainSources: readonly P2MainSourceEvidence[];
     aliasSources: readonly P2AliasSourceEvidence[];
     initialPendingChapters?: number;
+    kind?: string | null;
+    contentRating?: string | null;
+    genres?: readonly string[];
+    primarySource?: string | null;
     demandSignals?: {
         views24h: number;
         views7d: number;
@@ -149,6 +153,15 @@ export interface P2BatchCandidateInput {
         uniqueReaders24h?: number;
     };
 }
+export declare function selectDiverseP2Candidates(candidates: readonly P2BatchCandidateInput[], limit: number, options?: {
+    existingFocusMix?: {
+        sources?: Record<string, number>;
+        genres?: Record<string, number>;
+        kinds?: Record<string, number>;
+        contentRatings?: Record<string, number>;
+    };
+    randomFn?: () => number;
+}): P2BatchCandidateInput[];
 export interface P2BatchExecutionResult {
     admitted: boolean;
     gateStateAfter: string;
@@ -169,5 +182,9 @@ export declare class P2OnboardingPipeline {
     runControlledBatch(candidates: readonly P2BatchCandidateInput[], options?: {
         staffBypassAuth?: StaffOnboardingAuth;
         simulateCrashAfterStage?: 'BEFORE_COMMIT';
+        allowDeficitReplenishment?: boolean;
+        diversifySelection?: boolean;
+        randomFn?: () => number;
+        maxBatchSize?: number;
     }): Promise<P2BatchExecutionResult>;
 }

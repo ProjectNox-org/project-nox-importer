@@ -21,6 +21,11 @@ export interface WorkDemandSignals {
   hasP0NewReleaseBlocked: boolean;
   hoursWaitingInQueue: number;
   currentlyInCohort?: boolean;
+  genres?: readonly string[];
+  kind?: string | null;
+  contentRating?: string | null;
+  primarySource?: string | null;
+  availableSources?: readonly string[];
 }
 
 export interface DemandScoreResult {
@@ -101,4 +106,139 @@ export function selectFocusedP1Cohort(
     selectedIds: ranked.slice(0, clampedTarget).map((r) => r.workId),
     ranked,
   };
+}
+
+export type PopularityTier = 'HIGH' | 'MID' | 'TAIL';
+export type MissingBucket = 'NEAR_DONE' | 'MEDIUM' | 'LARGE';
+
+export function classifyPopularityTier(views7d: number, views30d: number): PopularityTier {
+  const ref = Math.max(views7d || 0, (views30d || 0) * 0.25);
+  if (ref >= 1000) return 'HIGH';
+  if (ref >= 100) return 'MID';
+  return 'TAIL';
+}
+
+export function classifyMissingBucket(remaining: number): MissingBucket {
+  if (remaining <= 5) return 'NEAR_DONE';
+  if (remaining <= 25) return 'MEDIUM';
+  return 'LARGE';
+}
+
+function normVal(val?: string | null, fallback = 'unknown'): string {
+  const s = String(val || '').trim().toLowerCase();
+  return s || fallback;
+}
+
+export function selectDiverseP1Cohort(
+  candidates: readonly WorkDemandSignals[],
+  openSlots: number,
+  options: {
+    existingCohort?: readonly WorkDemandSignals[];
+    randomFn?: () => number;
+    jitterPoints?: number;
+  } = {},
+): { selectedIds: string[]; ranked: DemandScoreResult[] } {
+  const targetPick = Math.max(0, Math.floor(openSlots));
+  const randomFn = options.randomFn ?? Math.random;
+  const jitterPoints = Math.max(0, options.jitterPoints ?? 12);
+
+  const genreCounts = new Map<string, number>();
+  const kindCounts = new Map<string, number>();
+  const ratingCounts = new Map<string, number>();
+  const sourceCounts = new Map<string, number>();
+  const popularityCounts = new Map<PopularityTier, number>();
+  const missingCounts = new Map<MissingBucket, number>();
+
+  const bump = <K>(map: Map<K, number>, key: K) => map.set(key, (map.get(key) ?? 0) + 1);
+  const recordWork = (w: WorkDemandSignals) => {
+    for (const g of w.genres || []) {
+      const ng = normVal(g, '');
+      if (ng) bump(genreCounts, ng);
+    }
+    if (w.kind) bump(kindCounts, normVal(w.kind));
+    if (w.contentRating) bump(ratingCounts, normVal(w.contentRating));
+    const src = w.primarySource || w.availableSources?.[0];
+    if (src) bump(sourceCounts, normVal(src));
+    bump(popularityCounts, classifyPopularityTier(w.views7d, w.views30d));
+    const remaining = Math.max(1, (w.totalManifestChapters || 0) - (w.publishedChapters || 0));
+    bump(missingCounts, classifyMissingBucket(remaining));
+  };
+
+  for (const w of options.existingCohort || []) {
+    recordWork(w);
+  }
+
+  const baseScores = new Map<string, DemandScoreResult>();
+  for (const c of candidates) {
+    baseScores.set(c.workId, scoreWorkDemand(c));
+  }
+
+  const pool = [...candidates];
+  const jitterById = new Map<string, number>();
+  for (const c of pool) {
+    jitterById.set(c.workId, randomFn() * jitterPoints);
+  }
+
+  const selectedIds: string[] = [];
+  const ranked: DemandScoreResult[] = [];
+
+  while (selectedIds.length < targetPick && pool.length > 0) {
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+
+    for (let i = 0; i < pool.length; i++) {
+      const c = pool[i];
+      const base = baseScores.get(c.workId)!.score;
+      let divBonus = 0;
+
+      const genres = (c.genres || []).map((g) => normVal(g, '')).filter(Boolean);
+      if (genres.length > 0) {
+        let unseenGenres = 0;
+        for (const g of genres) {
+          if ((genreCounts.get(g) ?? 0) === 0) unseenGenres++;
+        }
+        divBonus += unseenGenres > 0 ? Math.min(28, 18 + (unseenGenres - 1) * 5) : 0;
+      }
+
+      if (c.kind) {
+        const kCount = kindCounts.get(normVal(c.kind)) ?? 0;
+        divBonus += kCount === 0 ? 22 : kCount === 1 ? 8 : 0;
+      }
+
+      if (c.contentRating) {
+        const rCount = ratingCounts.get(normVal(c.contentRating)) ?? 0;
+        divBonus += rCount === 0 ? 20 : rCount === 1 ? 7 : 0;
+      }
+
+      const src = c.primarySource || c.availableSources?.[0];
+      if (src) {
+        const sCount = sourceCounts.get(normVal(src)) ?? 0;
+        divBonus += sCount === 0 ? 24 : sCount === 1 ? 8 : -sCount * 4;
+      }
+
+      const popTier = classifyPopularityTier(c.views7d, c.views30d);
+      divBonus += (popularityCounts.get(popTier) ?? 0) === 0 ? 12 : 0;
+
+      const remaining = Math.max(1, (c.totalManifestChapters || 0) - (c.publishedChapters || 0));
+      const missBucket = classifyMissingBucket(remaining);
+      divBonus += (missingCounts.get(missBucket) ?? 0) === 0 ? 10 : 0;
+
+      const total = base + divBonus + (jitterById.get(c.workId) ?? 0);
+      if (total > bestScore) {
+        bestScore = total;
+        bestIdx = i;
+      }
+    }
+
+    const chosen = pool.splice(bestIdx, 1)[0];
+    selectedIds.push(chosen.workId);
+    ranked.push(baseScores.get(chosen.workId)!);
+    recordWork(chosen);
+  }
+
+  for (const rem of pool) {
+    ranked.push(baseScores.get(rem.workId)!);
+  }
+
+  return { selectedIds, ranked };
 }

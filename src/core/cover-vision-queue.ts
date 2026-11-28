@@ -26,20 +26,18 @@ export interface CoverVisionWorkTask {
 export class CoverVisionQueue {
   private logger = new Logger('CoverVisionQueue');
   private schemaReady = false;
+  private schemaUnavailable = false;
+  private schemaUnavailableLogged = false;
 
   constructor(private readonly pool: pg.Pool) {}
 
   async ensureSchema(): Promise<void> {
-    if (this.schemaReady) return;
+    if (this.schemaReady || this.schemaUnavailable) return;
     try {
       const check = await this.pool.query<{ ok: boolean }>(`
         SELECT (to_regclass('public.cover_vision_work_tasks') IS NOT NULL) AS ok
       `);
       if (check.rows[0]?.ok) {
-        await this.pool.query(`
-          CREATE INDEX IF NOT EXISTS idx_cover_vision_tasks_due_v2
-            ON public.cover_vision_work_tasks (status, next_retry_at, attempts, updated_at);
-        `);
         this.schemaReady = true;
         return;
       }
@@ -70,7 +68,16 @@ export class CoverVisionQueue {
       `);
       this.schemaReady = true;
     } catch (err: any) {
-      this.logger.warn('Failed to ensure cover_vision_work_tasks schema', { error: err?.message });
+      const msg = String(err?.message || '');
+      if (err?.code === '42501' || /permission denied/i.test(msg)) {
+        this.schemaUnavailable = true;
+        if (!this.schemaUnavailableLogged) {
+          this.schemaUnavailableLogged = true;
+          this.logger.warn('Cover vision table missing and runtime role lacks DDL permission; disabling cover_vision_work_tasks queue safely', { error: msg });
+        }
+        return;
+      }
+      this.logger.warn('Failed to ensure cover_vision_work_tasks schema', { error: msg });
     }
   }
 
@@ -81,6 +88,7 @@ export class CoverVisionQueue {
   ): Promise<void> {
     if (!workId || !candidateCovers.length) return;
     await this.ensureSchema();
+    if (this.schemaUnavailable) return;
 
     const validIncoming = candidateCovers.filter((c) => c && c.coverUrl && c.source);
     if (!validIncoming.length) return;
@@ -176,6 +184,7 @@ export class CoverVisionQueue {
 
   async findDueTasks(limit = 2): Promise<CoverVisionWorkTask[]> {
     await this.ensureSchema();
+    if (this.schemaUnavailable) return [];
     const res = await this.pool.query<{
       work_id: string;
       candidate_covers: CoverCandidate[];
@@ -309,6 +318,7 @@ export class CoverVisionQueue {
 
   async getTask(workId: string): Promise<CoverVisionWorkTask | null> {
     await this.ensureSchema();
+    if (this.schemaUnavailable) return null;
     const res = await this.pool.query<{
       work_id: string;
       candidate_covers: CoverCandidate[];
