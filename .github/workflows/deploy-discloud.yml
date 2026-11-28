@@ -65,7 +65,6 @@ jobs:
           fi
 
       - name: Prepare PG18 mTLS runtime override
-        if: secrets.PG18_NOX_IMPORTER_PASSWORD != ''
         env:
           PG18_NOX_IMPORTER_PASSWORD: ${{ secrets.PG18_NOX_IMPORTER_PASSWORD }}
           PG18_MTLS_CA_B64: ${{ secrets.PG18_MTLS_CA_B64 }}
@@ -81,6 +80,10 @@ jobs:
           V3_TELEGRAM_MEDIA_CONCURRENCY: ${{ vars.V3_TELEGRAM_MEDIA_CONCURRENCY || '10' }}
           V3_DOWNLOAD_INFLIGHT_CONCURRENCY: ${{ vars.V3_DOWNLOAD_INFLIGHT_CONCURRENCY || '16' }}
         run: |
+          if [ -z "${PG18_NOX_IMPORTER_PASSWORD:-}" ]; then
+            echo "PG18_NOX_IMPORTER_PASSWORD secret not set; skipping .env.pg18.override"
+            exit 0
+          fi
           umask 077
           cat > .env.pg18.override <<EOF
           IMPORTER_DB_MODE=direct
