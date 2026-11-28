@@ -13,7 +13,7 @@ export class BRScansAdapter implements SourceAdapter {
   readonly id = 'brscans';
   readonly name = 'BR Scans';
   readonly baseUrl = 'https://brscans.vercel.app';
-  private readonly apiUrl = 'https://e5oer7ngt8.execute-api.sa-east-1.amazonaws.com/dev';
+  private readonly apiUrl = 'https://3wzrvo9ltl.execute-api.sa-east-1.amazonaws.com/dev';
 
   constructor(
     private readonly rateLimiter: HostRateLimiter = new HostRateLimiter(2),
@@ -29,7 +29,7 @@ export class BRScansAdapter implements SourceAdapter {
     await this.rateLimiter.acquire(host);
     const response = await this.transport(url, {
       headers: { Accept: 'application/json', Referer: `${this.baseUrl}/` },
-      signal: AbortSignal.timeout(3_000),
+      signal: AbortSignal.timeout(12_000),
     });
     if (!response.ok) throw new Error(`BRScans HTTP ${response.status} for ${path}`);
     this.rateLimiter.recordSuccess(host);

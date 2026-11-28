@@ -186,14 +186,10 @@ export class MadaraAdapter implements SourceAdapter {
       if (!rawSlug || rawSlug === this.mangaSubString || rawSlug === 'feed' || rawSlug === 'page' || rawSlug === 'order' || seenSlugs.has(rawSlug)) continue;
       seenSlugs.add(rawSlug);
 
+      const title = this.extractCardTitle(html, match, rawSlug);
       const chunkStart = Math.max(0, match.index - 500);
       const chunkEnd = Math.min(html.length, match.index + 500);
       const chunk = html.slice(chunkStart, chunkEnd);
-
-      const titleMatch = chunk.match(/class="[^"]*post-title[^"]*"[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i) ||
-                         chunk.match(/<h[345][^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i) ||
-                         chunk.match(/alt="([^"]+)"/i);
-      const title = decodeHtmlEntities(titleMatch ? titleMatch[1].trim() : rawSlug);
 
       // Robust cover extraction: prioritize lazy-load data attributes, ignore theme placeholders
       let coverUrl: string | null = null;
@@ -526,7 +522,61 @@ export class MadaraAdapter implements SourceAdapter {
       pages.push(candidate);
     }
 
+    if (pages.length === 0) {
+      if (/class="[^"]*\bmaintenance\b[^"]*"|site em manuten[cç][aã]o|wp-content\/plugins\/maintenance/i.test(html)) {
+        throw new Error('SOURCE_MAINTENANCE_BLOCKED: Site em manutenção');
+      }
+      if (/id=["']secure-manga-reader["']|gatekeeper\.php|wp-manga-chapter-images-protection|plugin\.obf\.js/i.test(html)) {
+        throw new Error('CLIENT_SIDE_ANTI_SCRAPE_BLOCKED: Encrypted/protected chapter reader (no bypass)');
+      }
+    }
+
     return pages;
+  }
+
+  private extractCardTitle(html: string, match: RegExpExecArray, rawSlug: string): string {
+    const inlineText = decodeHtmlEntities((match[3] || '').replace(/<[^>]+>/g, '').trim());
+    if (inlineText && inlineText.toLowerCase() !== 'feed' && !/^(?:design[_\s-]*sem[_\s-]*nome)$/i.test(inlineText)) {
+      return inlineText;
+    }
+
+    const escapedSlug = rawSlug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const windowStart = Math.max(0, match.index - 400);
+    const windowEnd = Math.min(html.length, match.index + 2000);
+    const wideChunk = html.slice(windowStart, windowEnd);
+
+    // Prefer heading links specifically pointing to this work slug so long srcset
+    // attributes never cause title truncation or bleed into adjacent cards.
+    const slugHeadingMatch =
+      wideChunk.match(new RegExp(`class="[^"]*post-title[^"]*"[^>]*>[\\s\\S]{0,200}<a[^>]*href="[^"]*\\/${escapedSlug}\\/?"[^>]*>([^<]+)<\\/a>`, 'i')) ||
+      wideChunk.match(new RegExp(`<h[1-6][^>]*>[\\s\\S]{0,160}<a[^>]*href="[^"]*\\/${escapedSlug}\\/?"[^>]*>([^<]+)<\\/a>`, 'i'));
+    if (slugHeadingMatch?.[1]?.trim()) {
+      return decodeHtmlEntities(slugHeadingMatch[1].trim());
+    }
+
+    const linkTitleMatch = match[0].match(/\btitle="([^"]+)"/i);
+    if (linkTitleMatch?.[1]?.trim()) {
+      return decodeHtmlEntities(linkTitleMatch[1].trim());
+    }
+
+    const localChunk = html.slice(match.index, Math.min(html.length, match.index + 900));
+    const localPostTitle =
+      localChunk.match(/class="[^"]*post-title[^"]*"[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i) ||
+      localChunk.match(/<h[345][^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i);
+    if (localPostTitle?.[1]?.trim()) {
+      return decodeHtmlEntities(localPostTitle[1].trim());
+    }
+
+    const altMatch = localChunk.match(/\balt="([^"]+)"/i);
+    const altText = altMatch?.[1] ? decodeHtmlEntities(altMatch[1].trim()) : '';
+    if (
+      altText &&
+      !/^(?:design[_\s-]*sem[_\s-]*nome|capa|cover|thumb|thumbnail|image|img|\d+)$/i.test(altText)
+    ) {
+      return altText;
+    }
+
+    return rawSlug;
   }
 
   async searchWorks(query: string): Promise<SourceWorkSummary[]> {
@@ -542,21 +592,10 @@ export class MadaraAdapter implements SourceAdapter {
       const rawSlug = match[2].trim();
       if (!rawSlug || rawSlug === this.mangaSubString || rawSlug === 'feed' || rawSlug === 'page' || rawSlug === 'order') continue;
 
-      let candidateTitle = decodeHtmlEntities(match[3]?.trim() || '');
-      if (!candidateTitle) {
-        const chunkStart = Math.max(0, match.index - 300);
-        const chunkEnd = Math.min(html.length, match.index + 400);
-        const chunk = html.slice(chunkStart, chunkEnd);
-        const titleMatch = chunk.match(/class="[^"]*post-title[^"]*"[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i) ||
-                           chunk.match(/<h[345][^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i) ||
-                           chunk.match(/title="([^"]+)"/i) ||
-                           chunk.match(/alt="([^"]+)"/i);
-        if (titleMatch?.[1]?.trim()) {
-          candidateTitle = decodeHtmlEntities(titleMatch[1].trim());
-        }
-      }
-
-      const title = candidateTitle || rawSlug;
+      const title = this.extractCardTitle(html, match, rawSlug);
+      const chunkStart = Math.max(0, match.index - 500);
+      const chunkEnd = Math.min(html.length, match.index + 500);
+      const chunk = html.slice(chunkStart, chunkEnd);
       if (title.toLowerCase() === 'feed') continue;
 
       const existing = bySlug.get(rawSlug);
