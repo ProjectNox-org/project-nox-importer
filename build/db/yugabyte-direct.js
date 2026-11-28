@@ -149,7 +149,7 @@ export function resolvePemInput(raw) {
     }
     return undefined;
 }
-function yugabytePoolOptions(cfg, max, applicationName, connectionTimeoutMillis, queryTimeoutMillis, sessionOptions = '', disableParallelWorkers = true, idleTimeoutMillis = 30000) {
+export function yugabytePoolOptions(cfg, max, applicationName, connectionTimeoutMillis, queryTimeoutMillis, sessionOptions = '', disableParallelWorkers = true, idleTimeoutMillis = 30000) {
     if (!cfg.YUGABYTE_HOST || !cfg.YUGABYTE_USER || !cfg.YUGABYTE_PASSWORD) {
         throw new Error('Yugabyte/PostgreSQL direct connection requires YUGABYTE_HOST, YUGABYTE_USER, and YUGABYTE_PASSWORD');
     }
@@ -211,7 +211,7 @@ function yugabytePoolOptions(cfg, max, applicationName, connectionTimeoutMillis,
         idleTimeoutMillis,
         query_timeout: queryTimeoutMillis,
         keepAlive: true,
-        keepAliveInitialDelayMillis: 10000,
+        keepAliveInitialDelayMillis: useDirectSsl ? 30_000 : 10_000,
         ssl: sslConfig,
         // pg@8.23 ConnectionParameters reads lowercase `sslnegotiation` for direct TLS / mTLS
         ...(useDirectSsl ? { sslnegotiation: 'direct' } : {}),
@@ -220,6 +220,15 @@ function yugabytePoolOptions(cfg, max, applicationName, connectionTimeoutMillis,
         // are present. The isolated P2 pool needs the batched-loop setting more
         // than the parallel-worker hint; retain all safeguards in the main pool.
         options: `${disableParallelWorkers ? '-c max_parallel_workers_per_gather=0 ' : ''}-c statement_timeout=${queryTimeoutMillis} -c idle_in_transaction_session_timeout=45000 ${sessionOptions}`.trim(),
+    };
+}
+export function mtlsPoolTimeouts(mtlsEnabled, lane) {
+    if (mtlsEnabled) {
+        return { connectionTimeoutMillis: 45_000, idleTimeoutMillis: 300_000 };
+    }
+    return {
+        connectionTimeoutMillis: 25_000,
+        idleTimeoutMillis: lane === 'metadata' ? 15_000 : 5_000,
     };
 }
 /**
@@ -234,7 +243,8 @@ export function createYugabyteMetadataPool() {
     }
     if (metadataPool)
         return metadataPool;
-    metadataPool = new pg.Pool(yugabytePoolOptions(cfg, 2, poolApplicationName('metadata'), 25_000, 25_000, '', true, 15_000));
+    const timeouts = mtlsPoolTimeouts(true, 'metadata');
+    metadataPool = new pg.Pool(yugabytePoolOptions(cfg, 2, poolApplicationName('metadata'), timeouts.connectionTimeoutMillis, 25_000, '', true, timeouts.idleTimeoutMillis));
     metadataPool.on('error', (err) => {
         logger.warn('Unexpected error on idle metadata pool client', { error: err.message });
     });
@@ -246,7 +256,8 @@ export function getYugabytePool() {
     const cfg = getConfig();
     const configuredMax = cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '1', 10);
     const directPoolMax = Math.max(1, Math.min(10, configuredMax));
-    pool = new pg.Pool(yugabytePoolOptions(cfg, directPoolMax, poolApplicationName('direct'), 25_000, 25_000, '', true, 5_000));
+    const timeouts = mtlsPoolTimeouts(Boolean(cfg.DB_MTLS_ENABLED), 'direct');
+    pool = new pg.Pool(yugabytePoolOptions(cfg, directPoolMax, poolApplicationName('direct'), timeouts.connectionTimeoutMillis, 25_000, '', true, timeouts.idleTimeoutMillis));
     pool.on('error', (err) => {
         logger.error('Unexpected error on idle direct Yugabyte client', { error: err.message });
     });

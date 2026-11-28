@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { getConfig } from '../config.js';
 import type { GatewayJob, PublishBatchParams } from '../core/gateway-client.js';
 /**
  * A bounded, parameter-free SQL class for runtime telemetry. Do not return
@@ -6,6 +7,11 @@ import type { GatewayJob, PublishBatchParams } from '../core/gateway-client.js';
  */
 export declare function getSqlFingerprint(queryArg: unknown): string;
 export declare function resolvePemInput(raw?: string): string | undefined;
+export declare function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, applicationName: string, connectionTimeoutMillis: number, queryTimeoutMillis: number, sessionOptions?: string, disableParallelWorkers?: boolean, idleTimeoutMillis?: number): pg.PoolConfig;
+export declare function mtlsPoolTimeouts(mtlsEnabled: boolean, lane: 'direct' | 'metadata'): {
+    connectionTimeoutMillis: number;
+    idleTimeoutMillis: number;
+};
 /**
  * Isolates background metadata / P0 discovery queries on OVH PG 18.7 mTLS (2 dedicated
  * connections) so chapter workers never queue behind background probes, while keeping

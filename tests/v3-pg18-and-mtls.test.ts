@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ExistingWorksReconciler } from '../src/core/reconciliation.js';
-import { resolvePemInput } from '../src/db/yugabyte-direct.js';
+import { mtlsPoolTimeouts, resolvePemInput, yugabytePoolOptions } from '../src/db/yugabyte-direct.js';
 import { getConfig } from '../src/config.js';
 
 describe('V3 PG 18 Compatibility & mTLS Pool Support', () => {
@@ -66,6 +66,41 @@ describe('V3 PG 18 Compatibility & mTLS Pool Support', () => {
       expect(cfg.DIRECT_DB_POOL_MAX).toBe(4);
       expect(cfg.WEBP_MAX_CONCURRENT).toBe(3);
       expect(cfg.DB_MTLS_SERVERNAME).toBe('pg-importer.nox.internal');
+    } finally {
+      if (prev === undefined) delete process.env.YUGABYTE_PASSWORD;
+    }
+  });
+
+  it('keeps mTLS pools warm (300s idle, 45s connect, 30s TCP keepalive) while preserving legacy Yugabyte timeouts', () => {
+    expect(mtlsPoolTimeouts(true, 'direct')).toEqual({ connectionTimeoutMillis: 45_000, idleTimeoutMillis: 300_000 });
+    expect(mtlsPoolTimeouts(true, 'metadata')).toEqual({ connectionTimeoutMillis: 45_000, idleTimeoutMillis: 300_000 });
+    expect(mtlsPoolTimeouts(false, 'direct')).toEqual({ connectionTimeoutMillis: 25_000, idleTimeoutMillis: 5_000 });
+    expect(mtlsPoolTimeouts(false, 'metadata')).toEqual({ connectionTimeoutMillis: 25_000, idleTimeoutMillis: 15_000 });
+
+    const prev = process.env.YUGABYTE_PASSWORD;
+    if (!prev) process.env.YUGABYTE_PASSWORD = 'test-placeholder';
+    try {
+      const baseCfg = getConfig();
+      const pem = '-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----';
+      const mtlsOpts = yugabytePoolOptions(
+        {
+          ...baseCfg,
+          DB_MTLS_ENABLED: true,
+          DB_MTLS_CA_CERT: pem,
+          DB_MTLS_CLIENT_CERT: pem,
+          DB_MTLS_CLIENT_KEY: pem,
+        },
+        6,
+        'test-mtls',
+        45_000,
+        25_000,
+        '',
+        true,
+        300_000,
+      );
+      expect(mtlsOpts.idleTimeoutMillis).toBe(300_000);
+      expect(mtlsOpts.connectionTimeoutMillis).toBe(45_000);
+      expect(mtlsOpts.keepAliveInitialDelayMillis).toBe(30_000);
     } finally {
       if (prev === undefined) delete process.env.YUGABYTE_PASSWORD;
     }
