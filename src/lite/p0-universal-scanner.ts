@@ -66,6 +66,8 @@ export interface P0SourceCatalogFetchResult {
   outcome: 'OK_COMPLETE' | 'OK_PARTIAL' | 'BLOCKED' | 'RATE_LIMITED' | 'TRANSIENT_ERROR' | 'TIMEOUT';
   items: readonly P0CatalogItem[];
   httpCallsUsed: number;
+  expectedTotalItems?: number;
+  previousItemCount?: number;
   errorDetail?: string;
 }
 
@@ -195,6 +197,8 @@ export interface P0UniversalCycleReport {
   httpCallsUsed: number;
   newChaptersFound: Array<{ workId: string; sourceId: string; latestOrderKey?: string }>;
   countsByStatus: Record<P0PairStatus, number>;
+  pendingSources: string[];
+  integrityAnomalies: Array<{ sourceId: string; reason: string }>;
   elapsedMs: number;
   pauseAppliedMs: number;
   resumedFromCheckpoint: boolean;
@@ -405,6 +409,8 @@ export class P0UniversalScanner {
     const completedSet = new Set<string>(canResume ? saved!.completedSources : []);
     let totalHttpCalls = canResume ? saved!.totalHttpCalls : 0;
     const newChaptersFound: Array<{ workId: string; sourceId: string; latestOrderKey?: string }> = [];
+    const pendingSources: string[] = [];
+    const integrityAnomalies: Array<{ sourceId: string; reason: string }> = [];
     let timedOut = false;
 
     for (let si = 0; si < this.sources.length; si++) {
@@ -416,6 +422,7 @@ export class P0UniversalScanner {
         for (let rem = si; rem < this.sources.length; rem++) {
           if (!completedSet.has(this.sources[rem].id)) {
             matrix.fillSourceColumn(rem, 'PENDING_TIMEOUT');
+            pendingSources.push(this.sources[rem].id);
           }
         }
         break;
@@ -423,33 +430,67 @@ export class P0UniversalScanner {
 
       if (source.status === 'BLOCKED' || source.status === 'BROKEN') {
         matrix.fillSourceColumn(si, 'SKIPPED_BLOCKED_SOURCE');
+        pendingSources.push(source.id);
         completedSet.add(source.id);
       } else if (source.status === 'RATE_LIMITED') {
         matrix.fillSourceColumn(si, 'RATE_LIMITED');
+        pendingSources.push(source.id);
         completedSet.add(source.id);
       } else {
         const res = await fetcher.fetchSourceCatalog(source);
         totalHttpCalls += res.httpCallsUsed;
 
-        if (res.outcome === 'BLOCKED') {
+        let effectiveOutcome = res.outcome;
+        if ((effectiveOutcome === 'OK_COMPLETE' || effectiveOutcome === 'OK_PARTIAL') && res.items.length === 0) {
+          integrityAnomalies.push({
+            sourceId: source.id,
+            reason: `EMPTY_CATALOG_SUSPECT(${res.outcome})`,
+          });
+          effectiveOutcome = 'TRANSIENT_ERROR';
+        } else if (effectiveOutcome === 'OK_COMPLETE') {
+          const underExpected =
+            res.expectedTotalItems !== undefined &&
+            res.expectedTotalItems > 0 &&
+            res.items.length < Math.floor(res.expectedTotalItems * 0.5);
+          const sharpDrop =
+            res.previousItemCount !== undefined &&
+            res.previousItemCount >= 20 &&
+            res.items.length < Math.floor(res.previousItemCount * 0.3);
+          if (underExpected || sharpDrop) {
+            integrityAnomalies.push({
+              sourceId: source.id,
+              reason: `SUSPECT_TRUNCATED_CATALOG(items=${res.items.length},expected=${res.expectedTotalItems ?? 'na'},prev=${res.previousItemCount ?? 'na'})`,
+            });
+            effectiveOutcome = 'OK_PARTIAL';
+          }
+        }
+
+        if (effectiveOutcome === 'BLOCKED') {
           matrix.fillSourceColumn(si, 'SKIPPED_BLOCKED_SOURCE');
+          pendingSources.push(source.id);
           completedSet.add(source.id);
-        } else if (res.outcome === 'RATE_LIMITED') {
+        } else if (effectiveOutcome === 'RATE_LIMITED') {
           matrix.fillSourceColumn(si, 'RATE_LIMITED');
+          pendingSources.push(source.id);
           completedSet.add(source.id);
-        } else if (res.outcome === 'TIMEOUT') {
+        } else if (effectiveOutcome === 'TIMEOUT') {
           matrix.fillSourceColumn(si, 'PENDING_TIMEOUT');
+          pendingSources.push(source.id);
           completedSet.add(source.id);
-        } else if (res.outcome === 'TRANSIENT_ERROR') {
+        } else if (effectiveOutcome === 'TRANSIENT_ERROR') {
           matrix.fillSourceColumn(si, 'TRANSIENT_ERROR');
+          pendingSources.push(source.id);
           completedSet.add(source.id);
         } else {
           // OK_COMPLETE or OK_PARTIAL
           // First default every work in this source column strictly & honestly:
           // - OK_COMPLETE -> unmatched works are provably NOT_FOUND_ON_SOURCE
           // - OK_PARTIAL -> unmatched works MUST NOT be claimed NOT_FOUND_ON_SOURCE; mark TRANSIENT_ERROR unless verified by direct probe
+          if (effectiveOutcome === 'OK_PARTIAL') {
+            pendingSources.push(source.id);
+          }
           const defaultUnmatched: P0PairStatus =
-            res.outcome === 'OK_COMPLETE' ? 'NOT_FOUND_ON_SOURCE' : 'TRANSIENT_ERROR';
+            effectiveOutcome === 'OK_COMPLETE' ? 'NOT_FOUND_ON_SOURCE' : 'TRANSIENT_ERROR';
           matrix.fillSourceColumn(si, defaultUnmatched);
 
           for (const item of res.items) {
@@ -470,7 +511,7 @@ export class P0UniversalScanner {
             }
           }
 
-          if (res.outcome === 'OK_PARTIAL' && fetcher.probeWorkDirect) {
+          if (effectiveOutcome === 'OK_PARTIAL' && fetcher.probeWorkDirect) {
             let directProbes = 0;
             for (let wi = 0; wi < this.works.length && directProbes < this.directFallbackCap; wi++) {
               if (matrix.getByIndex(wi, si) !== 'TRANSIENT_ERROR') continue;
@@ -516,9 +557,10 @@ export class P0UniversalScanner {
       }
     }
 
-    const finalStatus: P0UniversalCycleReport['status'] = timedOut
-      ? 'COMPLETED_WITH_PENDING'
-      : 'COMPLETED';
+    const finalStatus: P0UniversalCycleReport['status'] =
+      timedOut || pendingSources.length > 0
+        ? 'COMPLETED_WITH_PENDING'
+        : 'COMPLETED';
     const countsByStatus = matrix.getCounts();
     const elapsedMs = Math.max(0, this.now() - t0);
 
@@ -547,10 +589,42 @@ export class P0UniversalScanner {
       httpCallsUsed: totalHttpCalls,
       newChaptersFound,
       countsByStatus,
+      pendingSources: [...new Set(pendingSources)],
+      integrityAnomalies,
       elapsedMs,
       pauseAppliedMs,
       resumedFromCheckpoint: canResume,
       matrix,
+    };
+  }
+
+  /** Sub-ciclo rápido incremental sobre fontes saudáveis para detectar atualizações sem comprometer a cobertura 43 x N. */
+  async runRecentUpdatesFastLane(
+    fetcher: P0UniversalCatalogFetcher,
+    options: { maxSources?: number } = {},
+  ): Promise<{ inspectedSources: number; newChaptersFound: Array<{ workId: string; sourceId: string; latestOrderKey?: string }> }> {
+    const healthySources = this.sources
+      .filter((s) => s.status === 'HEALTHY')
+      .slice(0, Math.max(1, options.maxSources ?? this.sources.length));
+    const newChaptersFound: Array<{ workId: string; sourceId: string; latestOrderKey?: string }> = [];
+    for (const source of healthySources) {
+      const res = await fetcher.fetchSourceCatalog(source);
+      if (res.outcome !== 'OK_COMPLETE' && res.outcome !== 'OK_PARTIAL') continue;
+      if (res.items.length === 0) continue;
+      for (const item of res.items) {
+        const wi = this.workIndex.resolveItem(item);
+        if (wi === null) continue;
+        const work = this.works[wi];
+        const latestOrder = item.latestChapter ? String(item.latestChapter) : undefined;
+        const knownLatest = work.knownLatestOrderBySource?.[source.id];
+        if (latestOrder && knownLatest !== latestOrder) {
+          newChaptersFound.push({ workId: work.id, sourceId: source.id, latestOrderKey: latestOrder });
+        }
+      }
+    }
+    return {
+      inspectedSources: healthySources.length,
+      newChaptersFound,
     };
   }
 }

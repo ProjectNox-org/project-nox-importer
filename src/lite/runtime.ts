@@ -1445,7 +1445,7 @@ export class ImporterLiteRuntime {
         const coordinator = new P0CycleCoordinator({
           matcher,
           persistence,
-          eligibleWorkCount: works.length || P0_ELIGIBLE_WORK_COUNT,
+          eligibleWorkCount: works.length,
           canonicalWorkCount: works.length,
           p2AdmissionPolicy: {
             isSuspended: () => Boolean(this.p2SubordinationState.subordinated),
@@ -1535,7 +1535,11 @@ export class ImporterLiteRuntime {
         enabledSources = await (this.queue as any).enabledSources();
       }
       if (!enabledSources.length) {
-        enabledSources = ['mangaflix', 'nexus', 'manhastro', 'mangotoons', 'taimumangas', 'hipercool', 'hanamiheaven'];
+        enabledSources = this.registry.getAll().map((adapter) => adapter.id).filter(Boolean);
+      }
+      if (!enabledSources.length) {
+        this.logger.warn('P0 universal cycle skipped: no enabled or registered sources available');
+        return false;
       }
 
       // Prioritize uninspected sources in the current active cycle to complete cycles efficiently
@@ -1549,7 +1553,7 @@ export class ImporterLiteRuntime {
       const checkCycleAdvancement = async (): Promise<void> => {
         const metrics = coordinator.getCycleMetrics();
         if (metrics.sourcesProcessed >= enabledSources.length) {
-          await coordinator.completeCycle();
+          await coordinator.completeCycle({ expectedSources: enabledSources });
           this.logger.info('P0 universal cycle completed', coordinator.getCycleMetrics());
           await coordinator.advanceToNextCycle();
         }
@@ -1595,10 +1599,16 @@ export class ImporterLiteRuntime {
         return false;
       }
 
-      await coordinator.recordSourceCatalog(source, items, { isFullCatalog: false });
-      if (items.length > 0) {
-        await coordinator.matchCandidateWorks(items, { isFullCatalog: false });
+      if (items.length === 0) {
+        this.logger.warn('Source catalog feed returned zero items on HTTP success; marking FAILED to prevent false NOT_FOUND', { source });
+        await coordinator.recordSourceCoverage(source, 'FAILED', 'EMPTY_CATALOG_RESPONSE');
+        await coordinator.recordSourceCatalog(source, [], { isFullCatalog: false });
+        await checkCycleAdvancement();
+        return false;
       }
+
+      await coordinator.recordSourceCatalog(source, items, { isFullCatalog: false });
+      await coordinator.matchCandidateWorks(items, { isFullCatalog: false });
 
       await checkCycleAdvancement();
       return true;
@@ -2672,9 +2682,10 @@ export class ImporterLiteRuntime {
     if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()) return;
     const pressured = this.hasSustainedSourceMetadataPoolPressure();
     // One single-flight P2 turn every two minutes prevents permanent
-    // discovery starvation without competing in every chapter wave.
+    // discovery starvation without competing in every chapter wave,
+    // while ALWAYS honoring P1 > P2 subordination first.
     if (pressured && Date.now() - this.lastNewWorkPressureTurnAt < 120_000) return;
-    if (!pressured && typeof (this.queue as any).hasExecutableOrRecoverableP1Backlog === 'function') {
+    if (typeof (this.queue as any).hasExecutableOrRecoverableP1Backlog === 'function') {
       try {
         const p1Backlog = await this.queue.hasExecutableOrRecoverableP1Backlog();
         this.p2SubordinationState = {
@@ -2685,6 +2696,11 @@ export class ImporterLiteRuntime {
       } catch (error: any) {
         this.logger.warn('P1 backlog check for P2 subordination failed', { error: error?.message });
       }
+    }
+    if (this.p2SubordinationState.subordinated) {
+      // V3.0 Contract F & Regra 9: When P1 has any executable work (PAUSED_P1_BUSY),
+      // normal P2 discovery and new-work batch creation stay strictly paused — even under pool pressure.
+      return;
     }
     if (!this.newWorkCatalogGate.tryAcquire()) {
       return;
@@ -2701,12 +2717,6 @@ export class ImporterLiteRuntime {
           if (discovery) await this.discover(discovery, workerId);
           return;
         }
-      }
-      if (this.p2SubordinationState.subordinated) {
-        // V3.0 Contract F & Regra 9: When P1 has any executable work (PAUSED_P1_BUSY),
-        // normal P2 discovery and new-work batch creation stay strictly paused.
-        // STAFF onboarding and P0 universal monitoring run on their separate lanes.
-        return;
       }
       const task = await this.queue.claimNewWorkCatalog(workerId, CATALOG_TASK_LEASE_SECONDS);
       if (task) {
@@ -4146,11 +4156,15 @@ export class ImporterLiteRuntime {
       const catalogInputs: EnqueueLiteTask[] = [];
       for (const work of candidateWorks) {
         const mappedWorkId = existingMappings.get(String(work.sourceWorkId));
+        if (this.p2SubordinationState.subordinated && !mappedWorkId) {
+          // Strict PAUSED_P1_BUSY invariant: never admit unmapped new P2 works while P1 has executable backlog
+          continue;
+        }
         catalogInputs.push({
           taskType: 'CATALOG',
           workId: mappedWorkId || undefined,
           workKey: mappedWorkId ? `work:${mappedWorkId}` : `source:${source}:${work.sourceWorkId}`,
-          priority: 'P2',
+          priority: mappedWorkId ? 'P1' : 'P2',
           idempotencyKey: `lite:catalog:${source}:${work.sourceWorkId}`,
           payload: { source, sourceWorkId: work.sourceWorkId },
         });

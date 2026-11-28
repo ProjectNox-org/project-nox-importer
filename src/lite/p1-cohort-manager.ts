@@ -91,11 +91,16 @@ export class P1CohortAndP2GateController {
   } {
     this.targetSize = computeAdaptiveCohortSize(bottleneck);
 
-    // Keep still-incomplete, non-blocked current cohort members first (slot stability),
-    // dropping completed works or externally blocked works (preserving blocked works in durable map).
+    // Keep still-executable or running, non-blocked current cohort members first (slot stability),
+    // evicting completed, externally blocked, or non-executable stalled works so other works don't starve.
     const retained = this.cohortIds.filter((id) => {
       const w = this.works.get(id);
-      return Boolean(w && w.pendingChapters > 0 && !w.externallyBlocked);
+      return Boolean(
+        w &&
+        w.pendingChapters > 0 &&
+        !w.externallyBlocked &&
+        (w.executableChapters > 0 || w.runningChapters > 0),
+      );
     });
 
     const retainedSet = new Set(retained);
@@ -225,4 +230,96 @@ export class P1CohortAndP2GateController {
       reason: `STAFF_EXCEPTION_AUDIT:${auth.staffUserId}`,
     };
   }
+
+  /** Re-habilita uma obra anteriormente bloqueada externamente quando a rota/fonte voltar a responder. */
+  unblockWork(workId: string, executableChapters?: number, pendingChapters?: number): P2GateState {
+    const existing = this.works.get(workId);
+    if (existing) {
+      existing.externallyBlocked = false;
+      existing.blockReason = null;
+      if (executableChapters !== undefined) existing.executableChapters = executableChapters;
+      if (pendingChapters !== undefined) existing.pendingChapters = pendingChapters;
+    }
+    return this.reconcile().p2GateState;
+  }
+
+  private readonly chapterLifecycle = new Map<string, P1ChapterLifecycleRecord>();
+
+  /** Registra estado durável de ciclo de vida de capítulo individual (evita falsa conclusão de obra). */
+  recordChapterLifecycle(
+    workId: string,
+    chapterKey: string,
+    state: ChapterLifecycleState,
+    reason: string | null = null,
+  ): void {
+    this.chapterLifecycle.set(`${workId}::${chapterKey}`, {
+      workId,
+      chapterKey,
+      state,
+      updatedAt: new Date().toISOString(),
+      reason,
+    });
+  }
+
+  /** Verifica conclusão real da obra confrontando fila ativa + estados individuais dos capítulos. */
+  verifyWorkCompletion(workId: string): P1WorkCompletionVerification {
+    const work = this.works.get(workId);
+    const records = [...this.chapterLifecycle.values()].filter((r) => r.workId === workId);
+    let publishedVerifiedCount = 0;
+    let pendingOrActiveCount = 0;
+    let blockedCount = 0;
+    let inconsistentCount = 0;
+    for (const r of records) {
+      if (r.state === 'PUBLISHED_VERIFIED') publishedVerifiedCount += 1;
+      else if (r.state === 'FAILED_BLOCKED') blockedCount += 1;
+      else if (r.state === 'ORPHANED_OR_INCONSISTENT') inconsistentCount += 1;
+      else pendingOrActiveCount += 1;
+    }
+    const queuePending = work ? (work.pendingChapters + work.executableChapters + work.runningChapters) : 0;
+    const completed =
+      queuePending === 0 &&
+      !work?.externallyBlocked &&
+      pendingOrActiveCount === 0 &&
+      blockedCount === 0 &&
+      inconsistentCount === 0 &&
+      (!work || work.totalManifestChapters === 0 || work.publishedChapters >= work.totalManifestChapters || publishedVerifiedCount >= work.totalManifestChapters);
+    return {
+      workId,
+      completed,
+      queuePending,
+      publishedVerifiedCount,
+      pendingOrActiveCount,
+      blockedCount,
+      inconsistentCount,
+      externallyBlocked: Boolean(work?.externallyBlocked),
+    };
+  }
+}
+
+export type ChapterLifecycleState =
+  | 'PENDING_FETCH'
+  | 'READY'
+  | 'CLAIMED'
+  | 'FAILED_RETRYABLE'
+  | 'FAILED_BLOCKED'
+  | 'PUBLISHED_VERIFIED'
+  | 'ORPHANED_OR_INCONSISTENT';
+
+export interface P1ChapterLifecycleRecord {
+  workId: string;
+  chapterKey: string;
+  state: ChapterLifecycleState;
+  updatedAt: string;
+  reason: string | null;
+}
+
+export interface P1WorkCompletionVerification {
+  workId: string;
+  completed: boolean;
+  queuePending: number;
+  publishedVerifiedCount: number;
+  pendingOrActiveCount: number;
+  blockedCount: number;
+  inconsistentCount: number;
+  externallyBlocked: boolean;
 }

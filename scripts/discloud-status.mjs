@@ -41,8 +41,18 @@ async function probeReader() {
     if (!res.ok) return { ok: false, status: res.status, latencyMs, latestPublishedAt: null };
     const body = await res.json().catch(() => null);
     const items = Array.isArray(body) ? body : (body?.releases || body?.items || body?.data || []);
-    const latestPublishedAt = items?.[0]?.published_at || items?.[0]?.publishedAt || items?.[0]?.created_at || null;
-    return { ok: true, status: res.status, latencyMs, latestPublishedAt };
+    const first = items?.[0];
+    const latestPublishedAt =
+      first?.latestPublishedAt ||
+      first?.chapters?.[0]?.publishedAt ||
+      first?.chapters?.[0]?.published_at ||
+      first?.published_at ||
+      first?.publishedAt ||
+      first?.created_at ||
+      null;
+    const latestMs = latestPublishedAt ? Date.parse(latestPublishedAt) : NaN;
+    const stalenessMinutes = Number.isFinite(latestMs) ? Math.max(0, Math.round((Date.now() - latestMs) / 60000)) : null;
+    return { ok: true, status: res.status, latencyMs, latestPublishedAt, stalenessMinutes };
   } catch (error) {
     return { ok: false, status: null, latencyMs: Date.now() - startedAt, error: error.message, latestPublishedAt: null };
   }

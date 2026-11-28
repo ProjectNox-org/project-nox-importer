@@ -3,6 +3,9 @@
 
 BEGIN;
 
+DROP INDEX IF EXISTS public.idx_chapters_timeline_published_desc_id;
+DROP INDEX IF EXISTS public.idx_chapters_work_published_desc_id;
+DROP INDEX IF EXISTS public.idx_works_lancamentos_published_desc;
 DROP TABLE IF EXISTS public.importer_p2_onboarding_checkpoints;
 DROP TABLE IF EXISTS public.importer_p0_pair_coverage_checkpoints;
 DROP FUNCTION IF EXISTS public.importer_v3_acquire_work_metadata_lock(uuid);

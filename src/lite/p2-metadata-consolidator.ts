@@ -388,7 +388,26 @@ export class P2MetadataConsolidator {
     };
 
     for (const t of gatheredTitles) addAlias(t.title, t.source, t.isExplicitPt ? 'pt-BR' : undefined);
+    const mainNormalizedSet = new Set(
+      gatheredTitles.map((t) => normalizeTitle(t.title)).filter(Boolean),
+    );
     for (const a of validatedAliasPayloads) {
+      const candAllTitles = [
+        a.candidate?.primaryTitle || '',
+        ...(a.candidate?.aliases || []).map((al) => al.title || ''),
+      ]
+        .map((x) => normalizeTitle(x))
+        .filter(Boolean);
+      const extMatch = Boolean(
+        (combinedExternalIds.mangadexId && a.candidate?.externalIds?.mangadexId === combinedExternalIds.mangadexId) ||
+        (combinedExternalIds.anilistId && a.candidate?.externalIds?.anilistId === combinedExternalIds.anilistId) ||
+        (combinedExternalIds.malId && a.candidate?.externalIds?.malId === combinedExternalIds.malId),
+      );
+      const titleOverlap = candAllTitles.some((t) => mainNormalizedSet.has(t));
+      if (!extMatch && !titleOverlap) {
+        aliasLeakageBlocked.push(`${a.sourceId}:uncorroborated_identity_rejected`);
+        continue;
+      }
       if (a.candidate?.primaryTitle) addAlias(a.candidate.primaryTitle, a.sourceId);
       for (const al of a.candidate?.aliases ?? []) {
         addAlias(al.title, a.sourceId, al.language);
@@ -405,10 +424,13 @@ export class P2MetadataConsolidator {
     }
 
     // 3. Select Best Proven Title (PT-BR priority without invented translations)
+    // Confirmed ALIAS_ONLY sources may add a bounded corroboration bonus ONLY to
+    // titles already provided by valid main sources (zero ALIAS_ONLY leakage).
     const titleScoreMap = new Map<string, {
       display: string;
       isPtBr: boolean;
       sources: Set<string>;
+      aliasCorroborators: number;
       score: number;
     }>();
 
@@ -417,23 +439,43 @@ export class P2MetadataConsolidator {
       if (!key) continue;
       const pt = t.isExplicitPt || isPtBrTitle(t.title) || isPortugueseAlias(t.title);
       const consecrated = isConsecratedProperTitle(t.title);
+      const aliasMatches =
+        aliasBuckets.get(key)?.sources.filter((s) => P2_MAX_SYNTHETIC_BYPASS_SOURCES.has(s)).length ?? 0;
+      const aliasBonus = Math.min(18, aliasMatches * 6);
       let entry = titleScoreMap.get(key);
       if (!entry) {
-        entry = { display: t.title, isPtBr: pt, sources: new Set([t.source]), score: 0 };
+        entry = {
+          display: t.title,
+          isPtBr: pt,
+          sources: new Set([t.source]),
+          aliasCorroborators: aliasMatches,
+          score: 0,
+        };
         titleScoreMap.set(key, entry);
       } else {
         entry.sources.add(t.source);
         if (pt) entry.isPtBr = true;
+        entry.aliasCorroborators = Math.max(entry.aliasCorroborators, aliasMatches);
+        if (entry.display.length < t.title.length && t.title.length <= 70) {
+          entry.display = t.title;
+        }
       }
-      // Prefer PT-BR proven across main sources, or consecrated franchise names
+      // Prefer PT-BR proven across main sources, or consecrated franchise names,
+      // and penalize ultra-short exclamation fragments (e.g. "JUST!!", "With!!")
+      const isShortNoise = /^[a-z0-9]{1,6}[!?.]*$/i.test(t.title.trim()) && t.title.trim().split(/\s+/).length === 1;
       entry.score =
         (entry.isPtBr ? 60 : consecrated ? 45 : 20) +
         Math.min(30, entry.sources.size * 12) +
-        (t.title.length >= 6 && t.title.length <= 90 ? 10 : 0);
+        aliasBonus +
+        (t.title.length >= 8 && t.title.length <= 90 && !isShortNoise ? 10 : isShortNoise ? -10 : 0);
     }
 
     const rankedTitles = [...titleScoreMap.values()].sort(
-      (a, b) => b.score - a.score || b.sources.size - a.sources.size || a.display.length - b.display.length,
+      (a, b) =>
+        b.score - a.score ||
+        b.sources.size - a.sources.size ||
+        b.aliasCorroborators - a.aliasCorroborators ||
+        a.display.length - b.display.length,
     );
     const chosenTitleEntry = rankedTitles[0] ?? null;
 

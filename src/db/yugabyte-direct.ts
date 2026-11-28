@@ -127,39 +127,83 @@ uHYiQRE3S9hMRqpUOUMmWRRpqHTxYl/FUrqOR8k4g1mN34ZqOpJZOwNnVMOsa+fh
 o1DZJoSu3+Cu5ZEv1xOCWs0bOoinIt45bqT0jrEXQDDhwGWR3gC64VMqffla1g==
 -----END CERTIFICATE-----`;
 
+export function resolvePemInput(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.includes('-----BEGIN ')) {
+    return trimmed.replace(/\\n/g, '\n');
+  }
+  if (fs.existsSync(trimmed)) {
+    return fs.readFileSync(trimmed, 'utf8');
+  }
+  try {
+    const decoded = Buffer.from(trimmed, 'base64').toString('utf8');
+    if (decoded.includes('-----BEGIN ')) {
+      return decoded;
+    }
+  } catch {
+    // ignore invalid base64
+  }
+  return undefined;
+}
+
 function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, applicationName: string,
   connectionTimeoutMillis: number, queryTimeoutMillis: number, sessionOptions = '', disableParallelWorkers = true,
   idleTimeoutMillis = 30000): pg.PoolConfig {
   if (!cfg.YUGABYTE_HOST || !cfg.YUGABYTE_USER || !cfg.YUGABYTE_PASSWORD) {
-    throw new Error('Yugabyte direct connection requires YUGABYTE_HOST, YUGABYTE_USER, and YUGABYTE_PASSWORD');
+    throw new Error('Yugabyte/PostgreSQL direct connection requires YUGABYTE_HOST, YUGABYTE_USER, and YUGABYTE_PASSWORD');
   }
 
-  let sslConfig: pg.ConnectionConfig['ssl'] = {
-    rejectUnauthorized: true,
-    ca: EMBEDDED_YUGABYTE_CA,
-  };
-
-  const candidateCerts = [
-    cfg.YUGABYTE_SSL_CERT,
-    path.resolve(process.cwd(), 'certs/yugabyte-root.crt'),
-    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../certs/yugabyte-root.crt'),
-    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../certs/yugabyte-root.crt'),
-    path.resolve(process.cwd(), 'build/certs/yugabyte-root.crt'),
-    '/home/node/certs/yugabyte-root.crt',
-    '/home/node/app/certs/yugabyte-root.crt',
-    path.resolve(process.cwd(), 'config/root.crt'),
-    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../config/root.crt'),
-    '/home/awerkori/.config/project-nox/root.crt',
-  ].filter(Boolean) as string[];
-
-  for (const certPath of candidateCerts) {
-    if (fs.existsSync(certPath)) {
-      sslConfig = {
-        rejectUnauthorized: true,
-        ca: fs.readFileSync(certPath, 'utf8'),
+  let sslConfig: pg.ConnectionConfig['ssl'] = cfg.YUGABYTE_SSL_MODE === 'disable'
+    ? false
+    : {
+        rejectUnauthorized: cfg.YUGABYTE_SSL_MODE !== 'require',
+        ca: EMBEDDED_YUGABYTE_CA,
       };
-      break;
+
+  if (sslConfig !== false) {
+    const candidateCerts = [
+      cfg.YUGABYTE_SSL_CERT,
+      path.resolve(process.cwd(), 'certs/yugabyte-root.crt'),
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../certs/yugabyte-root.crt'),
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../certs/yugabyte-root.crt'),
+      path.resolve(process.cwd(), 'build/certs/yugabyte-root.crt'),
+      '/home/node/certs/yugabyte-root.crt',
+      '/home/node/app/certs/yugabyte-root.crt',
+      path.resolve(process.cwd(), 'config/root.crt'),
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../config/root.crt'),
+      '/home/awerkori/.config/project-nox/root.crt',
+    ].filter(Boolean) as string[];
+
+    for (const certPath of candidateCerts) {
+      if (fs.existsSync(certPath)) {
+        sslConfig = {
+          rejectUnauthorized: cfg.YUGABYTE_SSL_MODE !== 'require',
+          ca: fs.readFileSync(certPath, 'utf8'),
+        };
+        break;
+      }
     }
+  }
+
+  let useDirectSsl = false;
+  if (cfg.DB_MTLS_ENABLED) {
+    const ca = resolvePemInput(cfg.DB_MTLS_CA_CERT);
+    const cert = resolvePemInput(cfg.DB_MTLS_CLIENT_CERT);
+    const key = resolvePemInput(cfg.DB_MTLS_CLIENT_KEY);
+    if (!ca || !cert || !key) {
+      throw new Error('DB_MTLS_ENABLED=true requires DB_MTLS_CA_CERT, DB_MTLS_CLIENT_CERT, and DB_MTLS_CLIENT_KEY');
+    }
+    sslConfig = {
+      ca,
+      cert,
+      key,
+      servername: cfg.DB_MTLS_SERVERNAME,
+      minVersion: 'TLSv1.3',
+      rejectUnauthorized: true,
+    } as pg.ConnectionConfig['ssl'];
+    useDirectSsl = true;
   }
 
   return {
@@ -175,12 +219,14 @@ function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, app
     keepAlive: true,
     keepAliveInitialDelayMillis: 10000,
     ssl: sslConfig,
+    // pg@8.23 ConnectionParameters reads lowercase `sslnegotiation` for direct TLS / mTLS
+    ...(useDirectSsl ? { sslnegotiation: 'direct' } : {}),
     application_name: applicationName,
     // Yugabyte rejects this deployment's startup packet when four -c flags
     // are present. The isolated P2 pool needs the batched-loop setting more
     // than the parallel-worker hint; retain all safeguards in the main pool.
     options: `${disableParallelWorkers ? '-c max_parallel_workers_per_gather=0 ' : ''}-c statement_timeout=${queryTimeoutMillis} -c idle_in_transaction_session_timeout=15000 ${sessionOptions}`.trim(),
-  };
+  } as pg.PoolConfig;
 }
 
 /**

@@ -528,4 +528,17 @@ CREATE TABLE IF NOT EXISTS public.importer_p2_onboarding_checkpoints (
 CREATE INDEX IF NOT EXISTS importer_p2_onboarding_checkpoints_status_idx
   ON public.importer_p2_onboarding_checkpoints (status, updated_at DESC);
 
+-- 7. Partial B-tree indexes covering exact /lancamentos and /api/releases hot queries without full scans
+CREATE INDEX IF NOT EXISTS idx_works_lancamentos_published_desc
+  ON public.works (latest_chapter_published_at DESC, id DESC)
+  WHERE published = true AND latest_chapter_published_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_chapters_work_published_desc_id
+  ON public.chapters (work_id, published_at DESC, id DESC)
+  WHERE published_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_chapters_timeline_published_desc_id
+  ON public.chapters (published_at DESC, id DESC)
+  WHERE published_at IS NOT NULL;
+
 COMMIT;

@@ -23,13 +23,15 @@ export interface StoredMediaResult {
 export interface ProcessMediaOptions {
     skipDbInsert?: boolean;
     skipDedupLookup?: boolean;
+    skipWebpOptimization?: boolean;
     signal?: AbortSignal;
 }
 /**
  * Process a single image:
  * 1. Validate binary structure & dimensions.
- * 2. Calculate SHA-256.
- * 3. Check public.media for existing hash (deduplication) unless skipped.
- * 4. If not found, upload via StorageProvider and insert into public.media (or return descriptor for batching).
+ * 2. Adaptively optimize to compact WebP (~5 MB/chapter target) when applicable.
+ * 3. Calculate SHA-256.
+ * 4. Check public.media for existing hash (deduplication) unless skipped.
+ * 5. If not found, upload via StorageProvider and insert into public.media (or return descriptor for batching).
  */
 export declare function processAndStoreMedia(supabase: SupabaseClient, storage: StorageProvider, bytes: Uint8Array, userId: string, purpose?: string, chapterId?: string, options?: ProcessMediaOptions): Promise<StoredMediaResult>;

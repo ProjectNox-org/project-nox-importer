@@ -1,7 +1,7 @@
 /** P0's source catalog is allowed to discover mappings, never canonical works. */
 export declare const P0_ELIGIBLE_WORK_COUNT = 10749;
 export declare const P2_FROZEN_CANONICAL_WORK_COUNT = 24945;
-export type P0CycleStatus = 'IDLE' | 'RUNNING' | 'COMPLETED';
+export type P0CycleStatus = 'IDLE' | 'RUNNING' | 'COMPLETED' | 'COMPLETED_WITH_PENDING';
 export type CatalogMatchMethod = 'title' | 'alias' | 'slug' | 'trigram';
 export type P0CoverageState = 'MAPPED' | 'NOT_FOUND' | 'PENDING' | 'FAILED' | 'DEFERRED' | 'STALE';
 export interface CatalogItem {
@@ -233,7 +233,9 @@ export declare class P0CycleCoordinator {
     matchCandidateWorks(items?: readonly CatalogItem[], options?: {
         isFullCatalog?: boolean;
     }): Promise<SourceCatalogMatch[]>;
-    completeCycle(): Promise<P0CycleMetrics>;
+    completeCycle(options?: {
+        expectedSources?: readonly string[];
+    }): Promise<P0CycleMetrics>;
     setCoverageState(source: string, workId: string, state: P0CoverageState, error?: string | null): Promise<P0CoverageEntry>;
     getCoverageMatrix(source?: string): P0CoverageEntry[];
     getCoverageSnapshot(source?: string): P0CoverageEntry[];

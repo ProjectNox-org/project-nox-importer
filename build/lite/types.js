@@ -3,10 +3,10 @@
  * the legacy queue vocabulary: detail belongs in checkpoints and reasons, not
  * in ever more states.
  */
-export const LITE_PRIORITIES = ['STAFF', 'P0', 'P1', 'P2'];
+export const LITE_PRIORITIES = ['P0', 'STAFF', 'P1', 'P2'];
 export const LITE_PRIORITY_RANK = {
-    STAFF: 0,
-    P0: 1,
+    P0: 0,
+    STAFF: 1,
     P1: 2,
     P2: 3,
 };

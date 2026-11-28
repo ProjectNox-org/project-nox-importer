@@ -302,6 +302,35 @@ export class P2OnboardingPipeline {
       if (existingCp?.status === 'COMMITTED' && existingCp.workId) {
         createdWorkIds.push(existingCp.workId);
         if (existingCp.report) reports.push(existingCp.report);
+        // Crash recovery guard: ensure P1 + P0 enrollment completes even if crash occurred right after DB commit
+        const pendingChapters = Math.max(1, cand.initialPendingChapters ?? 1);
+        worksToEnrollInP1.push({
+          workId: existingCp.workId,
+          views24h: cand.demandSignals?.views24h ?? 10,
+          views7d: cand.demandSignals?.views7d ?? 50,
+          views30d: cand.demandSignals?.views30d ?? 100,
+          uniqueReaders24h: cand.demandSignals?.uniqueReaders24h ?? 5,
+          publishedChapters: 0,
+          totalManifestChapters: pendingChapters,
+          hasP0NewReleaseBlocked: false,
+          hoursWaitingInQueue: 0,
+          pendingChapters,
+          executableChapters: pendingChapters,
+          runningChapters: 0,
+          externallyBlocked: false,
+        });
+        if (this.p0Scanner) {
+          const fallbackTitle = cand.mainSources.find((m) => m.title?.trim())?.title?.trim() || cand.candidateKey;
+          const fallbackSlug = fallbackTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || existingCp.workId;
+          this.p0Scanner.enqueueImmediateWork({
+            id: existingCp.workId,
+            title: fallbackTitle,
+            slug: fallbackSlug,
+            aliases: cand.aliasSources
+              .flatMap((a) => (a.candidate?.aliases || []).map((al) => al.title))
+              .filter((t): t is string => Boolean(t && t.trim())),
+          });
+        }
         continue;
       }
 
@@ -339,7 +368,7 @@ export class P2OnboardingPipeline {
         let coverId: string | null = null;
         if (consolidated.coverBufferToStore && consolidated.report.selectedCover) {
           const stored = existingCp?.storedCoverMedia
-            ?? (await processAndStoreMedia({} as any, this.storage, consolidated.coverBufferToStore, 'importer-p2-v3', 'cover', undefined, { skipDbInsert: true, skipDedupLookup: true }));
+            ?? (await processAndStoreMedia({} as any, this.storage, consolidated.coverBufferToStore, 'importer-p2-v3', 'editorial', undefined, { skipDbInsert: true, skipDedupLookup: true }));
           coverId = await this.persistence.insertCoverMediaRow(stored);
         }
         await this.persistence.enrichExistingWorkSafe({
@@ -377,7 +406,7 @@ export class P2OnboardingPipeline {
 
       // Store cover via Project Nox storage pipeline (reuse checkpointed upload if resuming after crash!)
       const storedCover = existingCp?.storedCoverMedia
-        ?? (await processAndStoreMedia({} as any, this.storage, consolidated.coverBufferToStore, 'importer-p2-v3', 'cover', undefined, { skipDbInsert: true, skipDedupLookup: true }));
+        ?? (await processAndStoreMedia({} as any, this.storage, consolidated.coverBufferToStore, 'importer-p2-v3', 'editorial', undefined, { skipDbInsert: true, skipDedupLookup: true }));
 
       await this.persistence.saveCheckpoint({
         candidateKey: cand.candidateKey,

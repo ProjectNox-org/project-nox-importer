@@ -18,6 +18,8 @@ declare const ConfigSchema: z.ZodObject<{
     ADAPTIVE_INITIAL_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     TESTED_CONCURRENCY_CEILING: z.ZodDefault<z.ZodNumber>;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
+    WEBP_MAX_CONCURRENT: z.ZodDefault<z.ZodNumber>;
+    WEBP_MAX_CONCURRENT_HEAVY: z.ZodDefault<z.ZodNumber>;
     DIRECT_DB_POOL_MAX: z.ZodDefault<z.ZodNumber>;
     METADATA_DB_POOL_MAX: z.ZodDefault<z.ZodNumber>;
     UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.ZodDefault<z.ZodNumber>;
@@ -34,6 +36,12 @@ declare const ConfigSchema: z.ZodObject<{
     YUGABYTE_PASSWORD: z.ZodString;
     YUGABYTE_DATABASE: z.ZodDefault<z.ZodString>;
     YUGABYTE_SSL_CERT: z.ZodDefault<z.ZodString>;
+    YUGABYTE_SSL_MODE: z.ZodDefault<z.ZodEnum<["verify-full", "require", "disable"]>>;
+    DB_MTLS_ENABLED: z.ZodDefault<z.ZodBoolean>;
+    DB_MTLS_CA_CERT: z.ZodOptional<z.ZodString>;
+    DB_MTLS_CLIENT_CERT: z.ZodOptional<z.ZodString>;
+    DB_MTLS_CLIENT_KEY: z.ZodOptional<z.ZodString>;
+    DB_MTLS_SERVERNAME: z.ZodDefault<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     SUPABASE_URL: string;
     SUPABASE_SERVICE_ROLE_KEY: string;
@@ -49,6 +57,8 @@ declare const ConfigSchema: z.ZodObject<{
     ADAPTIVE_INITIAL_CONCURRENCY: number;
     TESTED_CONCURRENCY_CEILING: number;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: number;
+    WEBP_MAX_CONCURRENT: number;
+    WEBP_MAX_CONCURRENT_HEAVY: number;
     DIRECT_DB_POOL_MAX: number;
     METADATA_DB_POOL_MAX: number;
     UPLOAD_RATE_LIMIT_BYTES_PER_SEC: number;
@@ -65,10 +75,16 @@ declare const ConfigSchema: z.ZodObject<{
     YUGABYTE_PASSWORD: string;
     YUGABYTE_DATABASE: string;
     YUGABYTE_SSL_CERT: string;
+    YUGABYTE_SSL_MODE: "verify-full" | "require" | "disable";
+    DB_MTLS_ENABLED: boolean;
+    DB_MTLS_SERVERNAME: string;
     NOX_STORAGE_BRIDGE_TOKEN?: string | undefined;
     TELEGRAM_BOT_TOKEN?: string | undefined;
     TELEGRAM_CHAT_ID?: string | undefined;
     IMPORTER_USER_ID?: string | undefined;
+    DB_MTLS_CA_CERT?: string | undefined;
+    DB_MTLS_CLIENT_CERT?: string | undefined;
+    DB_MTLS_CLIENT_KEY?: string | undefined;
 }, {
     YUGABYTE_PASSWORD: string;
     SUPABASE_URL?: string | undefined;
@@ -89,6 +105,8 @@ declare const ConfigSchema: z.ZodObject<{
     ADAPTIVE_INITIAL_CONCURRENCY?: number | undefined;
     TESTED_CONCURRENCY_CEILING?: number | undefined;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY?: number | undefined;
+    WEBP_MAX_CONCURRENT?: number | undefined;
+    WEBP_MAX_CONCURRENT_HEAVY?: number | undefined;
     DIRECT_DB_POOL_MAX?: number | undefined;
     METADATA_DB_POOL_MAX?: number | undefined;
     UPLOAD_RATE_LIMIT_BYTES_PER_SEC?: number | undefined;
@@ -104,6 +122,12 @@ declare const ConfigSchema: z.ZodObject<{
     YUGABYTE_USER?: string | undefined;
     YUGABYTE_DATABASE?: string | undefined;
     YUGABYTE_SSL_CERT?: string | undefined;
+    YUGABYTE_SSL_MODE?: "verify-full" | "require" | "disable" | undefined;
+    DB_MTLS_ENABLED?: boolean | undefined;
+    DB_MTLS_CA_CERT?: string | undefined;
+    DB_MTLS_CLIENT_CERT?: string | undefined;
+    DB_MTLS_CLIENT_KEY?: string | undefined;
+    DB_MTLS_SERVERNAME?: string | undefined;
 }>;
 export type Config = z.infer<typeof ConfigSchema>;
 export declare function getConfig(): Config;

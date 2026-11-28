@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Logger } from '../core/logger.js';
+import { optimizePageToWebp } from './webp-optimizer.js';
 const logger = new Logger('MediaPipeline');
 const text = (a, start, length) => String.fromCharCode(...a.slice(start, start + length));
 function parseAvifDimensions(a, d) {
@@ -161,13 +162,25 @@ export function calculateSha256(bytes) {
 /**
  * Process a single image:
  * 1. Validate binary structure & dimensions.
- * 2. Calculate SHA-256.
- * 3. Check public.media for existing hash (deduplication) unless skipped.
- * 4. If not found, upload via StorageProvider and insert into public.media (or return descriptor for batching).
+ * 2. Adaptively optimize to compact WebP (~5 MB/chapter target) when applicable.
+ * 3. Calculate SHA-256.
+ * 4. Check public.media for existing hash (deduplication) unless skipped.
+ * 5. If not found, upload via StorageProvider and insert into public.media (or return descriptor for batching).
  */
 export async function processAndStoreMedia(supabase, storage, bytes, userId, purpose = 'editorial', chapterId, options) {
-    const info = inspectImage(bytes);
-    const sha256 = calculateSha256(bytes);
+    let effectiveBytes = bytes;
+    let info = inspectImage(effectiveBytes);
+    if (!options?.skipWebpOptimization) {
+        try {
+            const opt = await optimizePageToWebp(effectiveBytes, { pageCount: 15 });
+            effectiveBytes = opt.bytes;
+            info = opt.info;
+        }
+        catch {
+            // Preserve pre-validated bytes for minimal synthetic fixtures
+        }
+    }
+    const sha256 = calculateSha256(effectiveBytes);
     // 1. Deduplication lookup (optional, skipped during batch chapter ingestion to avoid distributed seq scans)
     if (!options?.skipDedupLookup) {
         const { data: existing, error: findErr } = await supabase
@@ -194,7 +207,7 @@ export async function processAndStoreMedia(supabase, storage, bytes, userId, pur
     }
     // 2. Upload to storage provider
     const mediaId = crypto.randomUUID();
-    const providerKey = await storage.upload(bytes, info.mime, mediaId, chapterId, options?.signal);
+    const providerKey = await storage.upload(effectiveBytes, info.mime, mediaId, chapterId, options?.signal);
     // 3. Prepare media record
     const botRef = storage.getLastBotReference?.(mediaId) || 'MANGA_STORAGE_01';
     const shardId = storage.getLastShardId?.(mediaId) || null;
@@ -207,7 +220,7 @@ export async function processAndStoreMedia(supabase, storage, bytes, userId, pur
         mime: info.mime,
         width: info.width,
         height: info.height,
-        bytes: bytes.length,
+        bytes: effectiveBytes.length,
         sha256,
         created_by: userId,
         storage_ready: true,
@@ -227,7 +240,7 @@ export async function processAndStoreMedia(supabase, storage, bytes, userId, pur
         reused: false,
         width: info.width,
         height: info.height,
-        bytes: bytes.length,
+        bytes: effectiveBytes.length,
         mime: info.mime,
         mediaRecord,
     };

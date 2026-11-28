@@ -53,6 +53,7 @@ export declare class MadaraAdapter implements SourceAdapter {
     fetchWorkSnapshot(sourceWorkId: string, signal?: AbortSignal): Promise<SourceWorkSnapshot>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
+    private extractCardTitle;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
     getImageHeaders(url: string): Record<string, string>;
 }
