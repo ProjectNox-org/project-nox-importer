@@ -188,4 +188,39 @@ describe('Gate G3 — Adaptive WebP Optimizer, ProcessMedia & Site Protection', 
     ).rejects.toThrow('TEST_ABORT_UPLOAD');
     expect(provider.waitingQueue).toHaveLength(0);
   });
+
+  it('preserves already-valid WebP up to 2.5 MB and JPEG up to 1.5 MB without spawning sharp native RGBA allocations', async () => {
+    const rawWebp = await sharp({
+      create: { width: 800, height: 1200, channels: 3, background: { r: 25, g: 45, b: 95 } },
+    })
+      .webp({ quality: 85 })
+      .toBuffer();
+    // Padded within WebP container <= 2.5 MiB simulates a dense 700 KB webtoon strip exceeding per-page budget (e.g. 200 KB)
+    const paddedWebp = Buffer.concat([rawWebp, Buffer.alloc(600_000, 0)]);
+    paddedWebp.writeUInt32LE(paddedWebp.byteLength - 8, 4);
+
+    const optWebp = await optimizePageToWebp(paddedWebp, {
+      pageCount: 25,
+      targetChapterBytes: 5 * 1024 * 1024, // 200 KB per-page budget
+    });
+    expect(optWebp.reencoded).toBe(false);
+    expect(optWebp.skippedReason).toBe('ALREADY_COMPACT_WEBP_PRESERVED');
+    expect(optWebp.encodeMs).toBe(0);
+    expect(optWebp.mime).toBe('image/webp');
+
+    const rawJpeg = await sharp({
+      create: { width: 800, height: 1200, channels: 3, background: { r: 220, g: 180, b: 140 } },
+    })
+      .jpeg({ quality: 90 })
+      .toBuffer();
+    const paddedJpeg = Buffer.concat([rawJpeg.subarray(0, rawJpeg.byteLength - 2), Buffer.alloc(700_000, 0xaa), rawJpeg.subarray(rawJpeg.byteLength - 2)]);
+    const optJpeg = await optimizePageToWebp(paddedJpeg, {
+      pageCount: 25,
+      targetChapterBytes: 5 * 1024 * 1024,
+    });
+    expect(optJpeg.reencoded).toBe(false);
+    expect(optJpeg.skippedReason).toBe('ALREADY_COMPACT_JPEG_PRESERVED');
+    expect(optJpeg.encodeMs).toBe(0);
+    expect(optJpeg.mime).toBe('image/jpeg');
+  });
 });

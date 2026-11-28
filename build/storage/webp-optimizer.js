@@ -186,9 +186,8 @@ export async function optimizePageToWebp(inputBytes, options = {}) {
             skippedReason: 'ALREADY_WEBP_WITHIN_BUDGET',
         };
     }
-    // Also avoid wasteful generation-loss re-encodes on tall/large already-compact WebPs (<140 KB/MP and <=480 KB)
-    const bytesPerMegapixel = bytesIn / (pixels / 1_000_000);
-    if (preInfo.mime === 'image/webp' && bytesIn <= 480_000 && bytesPerMegapixel <= 140_000) {
+    // Also avoid wasteful generation-loss or OOM-prone native libvips decodes on already-compact WebPs up to 2.5 MiB
+    if (preInfo.mime === 'image/webp' && bytesIn <= Math.max(budgetBytes, 2_500_000)) {
         return {
             bytes: inputBytes,
             info: preInfo,
@@ -203,8 +202,8 @@ export async function optimizePageToWebp(inputBytes, options = {}) {
             skippedReason: 'ALREADY_COMPACT_WEBP_PRESERVED',
         };
     }
-    // JPEGs already within the per-page budget do not need CPU-heavy re-encoding
-    if (preInfo.mime === 'image/jpeg' && bytesIn <= budgetBytes) {
+    // JPEGs up to 1.5 MiB (or per-page budget) do not need CPU/RAM-heavy libvips re-encoding
+    if (preInfo.mime === 'image/jpeg' && bytesIn <= Math.max(budgetBytes, 1_500_000)) {
         return {
             bytes: inputBytes,
             info: preInfo,
@@ -219,9 +218,25 @@ export async function optimizePageToWebp(inputBytes, options = {}) {
             skippedReason: 'ALREADY_COMPACT_JPEG_PRESERVED',
         };
     }
+    // Protect 624 MiB containers from giant vertical webtoon strips (>28M pixels allocates >112 MiB raw RGBA in libvips)
+    if (pixels > 28_000_000 && bytesIn <= 8_000_000) {
+        return {
+            bytes: inputBytes,
+            info: preInfo,
+            mime: preInfo.mime,
+            bytesIn,
+            bytesOut: bytesIn,
+            encodeMs: 0,
+            qualityUsed: null,
+            reencoded: false,
+            hasAlpha: false,
+            animated: false,
+            skippedReason: 'OVERSIZED_DIMENSIONS_PRESERVED',
+        };
+    }
     const t0 = performance.now();
-    const useSequentialRead = pixels > 3_000_000 || bytesIn > 1_500_000;
-    const sharpOpts = { limitInputPixels: 100_000_000, ...(useSequentialRead ? { sequentialRead: true } : {}) };
+    const useSequentialRead = pixels > 2_000_000 || bytesIn > 600_000;
+    const sharpOpts = { limitInputPixels: 32_000_000, ...(useSequentialRead ? { sequentialRead: true } : {}) };
     const isHeavyStrip = pixels > HEAVY_STRIP_PIXELS;
     const encodeTask = () => withSharpSlot(async () => {
         let hasAlpha = false;
