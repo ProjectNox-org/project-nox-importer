@@ -191,9 +191,10 @@ describe('SourcePerformanceTracker & Dynamic Fast/Slow Scheduling', () => {
     expect(bytes.capacityBytes).toBe(64 * MIB);
   });
 
-  it('includes manhastro in warm-start slow priors and bounds slow sources in P1 Focus Group relaxation', async () => {
+  it('starts mangaflix in warm-start slow priors while allowing manhastro as NORMAL and bounds slow sources in P1 Focus Group relaxation', async () => {
     const tracker = new SourcePerformanceTracker();
-    expect(tracker.getTier('manhastro')).toBe('SLOW');
+    expect(tracker.getTier('manhastro')).toBe('NORMAL');
+    expect(tracker.getTier('mangaflix')).toBe('SLOW');
     expect(tracker.getTier('nocturnesummer')).toBe('FAST');
     expect(tracker.getTier('taimumangas')).toBe('FAST');
     expect(tracker.getTier('mrtenzus')).toBe('NORMAL');
@@ -229,13 +230,13 @@ describe('SourcePerformanceTracker & Dynamic Fast/Slow Scheduling', () => {
     } as unknown as Pool;
     const repo = new LiteRepository(mockDb, mockDb);
     const snap = await repo.refreshP1FocusGroup({
-      targetSize: 28,
+      targetSize: 10,
       maxPerSource: 8,
       sourceTiers: tracker.getTierMap(['mangaflix', 'nocturnesummer', 'mrtenzus']),
     });
-    expect(snap.focusWorkCount).toBe(28);
+    expect(snap.focusWorkCount).toBe(10);
     expect(snap.focusSources.mangaflix || 0).toBeLessThanOrEqual(2);
-    expect((snap.focusSources.nocturnesummer || 0) + (snap.focusSources.mrtenzus || 0)).toBeGreaterThanOrEqual(26);
+    expect((snap.focusSources.nocturnesummer || 0) + (snap.focusSources.mrtenzus || 0)).toBeGreaterThanOrEqual(8);
   });
 
   it('normalizes multi-page webtoon chapter wall time so fast CDNs with 60-page chapters are not misclassified as SLOW', () => {

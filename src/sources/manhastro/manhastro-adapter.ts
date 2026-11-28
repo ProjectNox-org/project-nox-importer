@@ -72,7 +72,7 @@ export class ManhastroAdapter implements SourceAdapter {
     private transport: typeof fetch = fetch
   ) {
     this.rateLimiter.setHostRate('api.manhastro.net', 2.0, 4, 4.0);
-    this.rateLimiter.setHostRate('albums.manhastro.net', 8.0, 16, 16.0);
+    this.rateLimiter.setHostRate('albums.manhastro.net', 12.0, 24, 24.0);
   }
 
   private ensureCatalogLoaded(): boolean {

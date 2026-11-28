@@ -20,7 +20,7 @@ export class BRScansAdapter implements SourceAdapter {
     private readonly transport: typeof fetch = fetch,
   ) {
     this.rateLimiter.setHostRate(new URL(this.apiUrl).host, 2, 4, 4);
-    this.rateLimiter.setHostRate('d47sf0ah3vbtc.cloudfront.net', 8, 16, 16);
+    this.rateLimiter.setHostRate('d47sf0ah3vbtc.cloudfront.net', 12, 24, 24);
   }
 
   private async request<T>(path: string): Promise<T> {

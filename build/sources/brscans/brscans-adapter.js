@@ -16,7 +16,7 @@ export class BRScansAdapter {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
         this.rateLimiter.setHostRate(new URL(this.apiUrl).host, 2, 4, 4);
-        this.rateLimiter.setHostRate('d47sf0ah3vbtc.cloudfront.net', 8, 16, 16);
+        this.rateLimiter.setHostRate('d47sf0ah3vbtc.cloudfront.net', 12, 24, 24);
     }
     async request(path) {
         const url = `${this.apiUrl}${path}`;

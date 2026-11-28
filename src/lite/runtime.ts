@@ -741,15 +741,10 @@ export class ImporterLiteRuntime {
   private mediaProfileForChapterAdmissionCap(cap: number): { pageBufferCapacity: number; pageByteCapacity: number } {
     const normalizedCap = Math.max(1, Math.floor(cap));
     if (normalizedCap >= 3 && normalizedCap <= 7) {
+      const highRam = this.containerRamMiB >= 600 && normalizedCap >= 5;
       return {
-        // The byte budget remains the authority for live media memory.  A
-        // production cap-seven sample left four download permits idle while
-        // twenty count-only buffer slots had nine waiters (p95 15.9 s), with
-        // only 27 MiB of live external memory.  Thirty-two slots remove that
-        // artificial count fence without widening the measured 56 MiB byte
-        // envelope used by cap five through seven.
-        pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, normalizedCap >= 5 ? 32 : 20),
-        pageByteCapacity: (normalizedCap >= 5 ? 56 : 40) * 1024 * 1024,
+        pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, highRam ? 40 : (normalizedCap >= 5 ? 32 : 20)),
+        pageByteCapacity: (highRam ? 96 : (normalizedCap >= 5 ? 56 : 40)) * 1024 * 1024,
       };
     }
     return {
@@ -797,7 +792,7 @@ export class ImporterLiteRuntime {
     // inside the unchanged global download (40), buffer (80), byte (128 MiB),
     // and Telegram (24) hard fences.
     this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads,
-      Math.max(1, Math.min(10, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter,
+      Math.max(1, Math.min(12, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter,
       this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes,
       config.SOURCE_OPERATION_TIMEOUT_MS, async () => { await this.refreshSourceFairness(); });
     this.executor.setPerformanceTracker(this.sourcePerformance, () => {
@@ -3213,7 +3208,8 @@ export class ImporterLiteRuntime {
   private tryAcquireBackgroundMetadataBudget(): (() => void) | null {
     const chapterDemandActive = this.chapterAdmissionGate.active > 0 || this.executor.getFairSourceDemand().length > 0;
     if (!chapterDemandActive) return () => {};
-    if (this.pool.waitingCount > 0 || !this.backgroundMetadataUnderChapterLoadGate.tryAcquire()) return null;
+    const metadataPoolBusy = this.sourceMetadataPool !== this.pool && (this.sourceMetadataPool.waitingCount || 0) > 0;
+    if (this.pool.waitingCount > 0 || metadataPoolBusy || !this.backgroundMetadataUnderChapterLoadGate.tryAcquire()) return null;
     return () => this.backgroundMetadataUnderChapterLoadGate.release();
   }
 

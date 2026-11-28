@@ -182,41 +182,40 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     manhastro: { maxChapters: 10, fairMaxChapters: 8, maxPagesPerChapter: 12 },
     mangotoons: { maxChapters: 8, fairMaxChapters: 4, maxPagesPerChapter: 10 },
     taimumangas: { maxChapters: 10, fairMaxChapters: 8, maxPagesPerChapter: 12 },
-    hipercool: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
+    hipercool: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 10 },
     // Nexus is the primary fast backlog provider with 6,000+ ready chapters.
     // Its CDN and Supabase host rate limiters (8 req/s burst 16, 4 req/s burst 8)
     // comfortably pace up to 22 concurrent chapters with 14 concurrent pages.
     nexus: { maxChapters: 22, fairMaxChapters: 18, maxPagesPerChapter: 14 },
     instahentai: { maxChapters: 2, maxPagesPerChapter: 4 },
     euphoriascan: { maxChapters: 2, maxPagesPerChapter: 4 },
-    fleurblanche: { maxChapters: 5, fairMaxChapters: 4, maxPagesPerChapter: 8 },
+    fleurblanche: { maxChapters: 5, fairMaxChapters: 4, maxPagesPerChapter: 10 },
     littletyrant: { maxChapters: 2, maxPagesPerChapter: 4 },
     mangalivreto: { maxChapters: 3, maxPagesPerChapter: 6 },
     montetai: { maxChapters: 3, maxPagesPerChapter: 6 },
     nebulosascan: { maxChapters: 2, maxPagesPerChapter: 4 },
     nocturnesummer: { maxChapters: 5, fairMaxChapters: 4, maxPagesPerChapter: 10 },
-    tankouhentai: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
+    tankouhentai: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 10 },
     cafecomyaoi: { maxChapters: 2, maxPagesPerChapter: 4 },
-    // Production ramp 2026-10-11: the 1→2 step sustained healthy media work
-    // with no 429, cooldown or failure streak. Keep the adapter's own 2→4
-    // req/s host limiter and page fence; three chapters remains below the four
-    // global Lite slots and is individually reversible.
-    hanamiheaven: { maxChapters: 3, maxPagesPerChapter: 2 },
+    // Production evidence: Hanami Heaven sustained 2.0s/page FAST at 99.4% success
+    // and BR Scans serves pages via CloudFront CDN at 99.8% success.
+    hanamiheaven: { maxChapters: 4, fairMaxChapters: 3, maxPagesPerChapter: 6 },
     hotcabaretscan: { maxChapters: 4, maxPagesPerChapter: 6 },
     borutoexplorer: { maxChapters: 4, maxPagesPerChapter: 6 },
-    covenscan: { maxChapters: 4, maxPagesPerChapter: 6 },
+    covenscan: { maxChapters: 4, maxPagesPerChapter: 8 },
+    brscans: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 10 },
     kamisamaexplorer: { maxChapters: 4, maxPagesPerChapter: 6 },
     mrtenzus: { maxChapters: 5, fairMaxChapters: 4, maxPagesPerChapter: 8 },
     ninjascan: { maxChapters: 4, maxPagesPerChapter: 6 },
     tiamanhwa: { maxChapters: 1, maxPagesPerChapter: 2 },
     apecomics: { maxChapters: 4, maxPagesPerChapter: 6 },
-    pizzariascan: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
+    pizzariascan: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 10 },
     mangaonlinetv: { maxChapters: 4, maxPagesPerChapter: 6 },
     pinkrosa: { maxChapters: 4, maxPagesPerChapter: 6 },
     galaxscanlator: { maxChapters: 4, maxPagesPerChapter: 6 },
     apenasumafa: { maxChapters: 4, maxPagesPerChapter: 6 },
     ler999: { maxChapters: 4, maxPagesPerChapter: 6 },
-    maidscan: { maxChapters: 4, maxPagesPerChapter: 6 },
+    maidscan: { maxChapters: 4, maxPagesPerChapter: 8 },
     hentaihome: { maxChapters: 4, maxPagesPerChapter: 6 },
     mundohentai: { maxChapters: 4, maxPagesPerChapter: 6 },
     hentaiseason: { maxChapters: 4, maxPagesPerChapter: 6 },
@@ -229,7 +228,7 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     hentaifusion: { maxChapters: 4, maxPagesPerChapter: 6 },
     zettahq: { maxChapters: 4, maxPagesPerChapter: 6 },
     nhentaibr: { maxChapters: 4, maxPagesPerChapter: 6 },
-    brasilhentai: { maxChapters: 4, maxPagesPerChapter: 6 },
+    brasilhentai: { maxChapters: 4, maxPagesPerChapter: 8 },
 };
 export const DEFAULT_SOURCE_LIMIT = {
     maxChapters: 2,

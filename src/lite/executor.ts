@@ -50,8 +50,8 @@ const withTimeout = async <T>(operation: Promise<T>, timeoutMs: number, code: st
 // intent is committed, reducing contention on the three-seat pool without
 // changing the durable-before-Telegram fence. Receipts remain scalar-only
 // after Telegram has confirmed the page.
-export const DURABLE_RESERVATION_BATCH_JOIN_MS = 120;
-export const DURABLE_RECEIPT_BATCH_JOIN_MS = 250;
+export const DURABLE_RESERVATION_BATCH_JOIN_MS = 350;
+export const DURABLE_RECEIPT_BATCH_JOIN_MS = 900;
 export const UPLOAD_BATCH_FLUSH_THRESHOLD = 24;
 
 async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
@@ -735,7 +735,7 @@ export class LiteExecutor {
       if (tier === 'FAST' && this.perChapterPageConcurrency >= 8) {
         limit = Math.max(limit, Math.min(12, sourceLimit));
       } else if (tier === 'SLOW' && this.hasPrimaryAlternative()) {
-        limit = Math.min(limit, 4);
+        limit = Math.min(limit, this.perChapterPageConcurrency >= 10 && this.downloads.available >= 12 ? 6 : 4);
       }
     }
     if (plannedPageCount && plannedPageCount > 45) {

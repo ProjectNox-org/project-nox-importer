@@ -54,7 +54,7 @@ const ConfigSchema = z.object({
     WEBP_MAX_CONCURRENT_HEAVY: z.coerce.number().int().min(1).max(2).default(1),
     // V3 PostgreSQL OVH pool headroom: up to 4 connections default (max 6) eliminates poolMax=1
     // serialization bottleneck while protecting public Reader/Lançamentos queries.
-    DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(6).default(4),
+    DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(8).default(4),
     METADATA_DB_POOL_MAX: z.coerce.number().int().min(1).max(1).default(1),
     // At the measured 52.75 MiB median chapter size, the former 4 MiB/s global
     // ceiling could never reach the 8/min acceptance floor (4.55/min before
@@ -63,7 +63,7 @@ const ConfigSchema = z.object({
     UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.coerce.number().int().default(8 * 1024 * 1024),
     // Bounded media concurrency to protect DB connection manager and CPU.
     TELEGRAM_MEDIA_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(6),
-    DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(48).default(12),
+    DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(12),
     BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(96).default(24),
     // Upstream adapter calls are network work, not a reason to monopolize a
     // chapter slot. The timeout is deliberately independent from the durable

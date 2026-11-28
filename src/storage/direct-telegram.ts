@@ -201,7 +201,7 @@ export class DirectTelegramStorageProvider implements StorageProvider {
         rateLimits429: 0,
         floodWaitSeconds: 0,
         cooldownUntil: 0,
-        maxConcurrent: 4,
+        maxConcurrent: 6,
         consecutiveSuccesses: 0,
         recentUploadTimestamps: [],
         latencies: [],
@@ -243,7 +243,7 @@ export class DirectTelegramStorageProvider implements StorageProvider {
         failures: 0,
         rateLimits429: 0,
         cooldownUntil: 0,
-        maxConcurrent: 3,
+        maxConcurrent: 4,
         recentUploadTimestamps: [],
         latencies: [],
       });
@@ -265,7 +265,7 @@ export class DirectTelegramStorageProvider implements StorageProvider {
         failures: 0,
         rateLimits429: 0,
         cooldownUntil: 0,
-        maxConcurrent: 3,
+        maxConcurrent: 4,
         recentUploadTimestamps: [],
         latencies: [],
       });
