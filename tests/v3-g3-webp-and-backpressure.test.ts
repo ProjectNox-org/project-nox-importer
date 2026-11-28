@@ -156,4 +156,36 @@ describe('Gate G3 — Adaptive WebP Optimizer, ProcessMedia & Site Protection', 
     });
     expect(bot.cooldownUntil).toBeGreaterThan(Date.now() + 8_000);
   });
+
+  it('preserves already-compact JPEG within page budget with zero encodeMs (no redundant sharp work)', async () => {
+    const compactJpeg = await sharp({
+      create: { width: 500, height: 750, channels: 3, background: { r: 210, g: 210, b: 215 } },
+    })
+      .jpeg({ quality: 80 })
+      .toBuffer();
+
+    const opt = await optimizePageToWebp(compactJpeg, {
+      pageCount: 15,
+      targetChapterBytes: 5 * 1024 * 1024, // ~349 KB per page budget
+    });
+    expect(opt.reencoded).toBe(false);
+    expect(opt.skippedReason).toBe('ALREADY_COMPACT_JPEG_PRESERVED');
+    expect(opt.encodeMs).toBe(0);
+    expect(opt.mime).toBe('image/jpeg');
+  });
+
+  it('aborts DirectTelegramStorage upload cleanly on AbortSignal without hanging forever', async () => {
+    const provider = Object.create(DirectTelegramStorageProvider.prototype) as any;
+    provider.maxGlobalConcurrent = 1;
+    provider.currentGlobalActive = 1; // Simulate saturated slot
+    provider.waitingQueue = [];
+
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new Error('TEST_ABORT_UPLOAD')), 30);
+
+    await expect(
+      provider.upload(Uint8Array.of(1, 2, 3), 'image/webp', 'm-abort', 'ch-abort', controller.signal),
+    ).rejects.toThrow('TEST_ABORT_UPLOAD');
+    expect(provider.waitingQueue).toHaveLength(0);
+  });
 });

@@ -44,8 +44,8 @@ const withTimeout = async (operation, timeoutMs, code) => {
 // intent is committed, reducing contention on the three-seat pool without
 // changing the durable-before-Telegram fence. Receipts remain scalar-only
 // after Telegram has confirmed the page.
-export const DURABLE_RESERVATION_BATCH_JOIN_MS = 350;
-export const DURABLE_RECEIPT_BATCH_JOIN_MS = 900;
+export const DURABLE_RESERVATION_BATCH_JOIN_MS = 120;
+export const DURABLE_RECEIPT_BATCH_JOIN_MS = 250;
 export const UPLOAD_BATCH_FLUSH_THRESHOLD = 24;
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
@@ -89,8 +89,8 @@ class PageAdmissionTimeoutError extends Error {
         this.name = 'PageAdmissionTimeoutError';
     }
 }
-const PAGE_ADMISSION_TIMEOUT_MS = 120_000;
-const PAGE_TRANSFER_TIMEOUT_MS = 60_000;
+const PAGE_ADMISSION_TIMEOUT_MS = 60_000;
+const PAGE_TRANSFER_TIMEOUT_MS = 40_000;
 function sourceFailure(error) {
     const normalized = error instanceof Error ? error : new Error(String(error || 'SOURCE_FAILURE'));
     normalized.sourceFailure = true;
@@ -1342,7 +1342,9 @@ export class LiteExecutor {
                                     const startedAt = performance.now();
                                     telemetryCollector.trackActiveDownload(1);
                                     try {
-                                        const adapterHeaders = await adapter.getImageHeaders?.(url);
+                                        const adapterHeaders = adapter.getImageHeaders
+                                            ? await withTimeout(Promise.resolve(adapter.getImageHeaders(url)), 8_000, 'IMAGE_HEADERS_TIMEOUT').catch(() => undefined)
+                                            : undefined;
                                         const imageHeaders = {
                                             Referer: adapter.baseUrl ? `${adapter.baseUrl}/` : (host ? `https://${host}/` : ''),
                                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
@@ -1401,13 +1403,13 @@ export class LiteExecutor {
                                 throw new Error(`CHAPTER_CONTENT_INVALID_PLACEHOLDER:${preSha}`);
                             }
                             try {
-                                const opt = await optimizePageToWebp(bytes, { pageCount: urls.length });
+                                const opt = await withTimeout(optimizePageToWebp(bytes, { pageCount: urls.length }), 15_000, 'WEBP_OPTIMIZE_TIMEOUT');
                                 encodeDemandMs += opt.encodeMs;
                                 bytes = opt.bytes;
                                 image = opt.info;
                             }
                             catch {
-                                // Preserve pre-validated bytes for minimal synthetic fixtures
+                                // Preserve pre-validated bytes on timeout or minimal synthetic fixtures so pageBufferLimiter never deadlocks
                             }
                             totalBytes += bytes.byteLength;
                             const sha256 = calculateSha256(bytes);
@@ -1431,7 +1433,8 @@ export class LiteExecutor {
                                 telemetryCollector.trackActiveTelegramUpload(1);
                                 let providerKey;
                                 try {
-                                    providerKey = await this.storage.upload(bytes, image.mime, reserved.mediaId, chapterId);
+                                    const uploadSignal = AbortSignal.timeout(65_000);
+                                    providerKey = await this.storage.upload(bytes, image.mime, reserved.mediaId, chapterId, uploadSignal);
                                     telemetryCollector.recordTelegramUpload(performance.now() - uploadStartedAt, bytes.length);
                                 }
                                 finally {

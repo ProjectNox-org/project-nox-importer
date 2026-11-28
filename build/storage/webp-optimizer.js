@@ -17,53 +17,94 @@ sharp.concurrency(1);
 const MAX_CONCURRENT_SHARP_JOBS = Math.max(1, Number(process.env.WEBP_MAX_CONCURRENT || '3'));
 const HEAVY_STRIP_PIXELS = 4_500_000;
 const MAX_CONCURRENT_HEAVY_STRIPS = Math.max(1, Number(process.env.WEBP_MAX_CONCURRENT_HEAVY || '1'));
+const WEBP_SLOT_WAIT_TIMEOUT_MS = Math.max(1_000, Number(process.env.WEBP_SLOT_WAIT_TIMEOUT_MS || '8000'));
+const WEBP_ENCODE_TIMEOUT_MS = Math.max(2_000, Number(process.env.WEBP_ENCODE_TIMEOUT_MS || '12000'));
 let activeSharpJobs = 0;
 let activeHeavyStrips = 0;
 let lastGcHintAt = 0;
 const sharpWaiters = [];
 const heavyStripWaiters = [];
 function maybeHintGcForLargeImage(bytesIn, pixels) {
-    if (bytesIn <= 1_500_000 && pixels <= 3_000_000)
+    if (bytesIn <= 2_500_000 && pixels <= 4_500_000)
         return;
     const gcFn = globalThis.gc;
     if (typeof gcFn !== 'function')
         return;
     const now = Date.now();
-    if (now - lastGcHintAt < 3000)
+    if (now - lastGcHintAt < 30_000)
         return;
-    if (process.memoryUsage().rss > 340 * 1024 * 1024) {
+    if (process.memoryUsage().rss > 460 * 1024 * 1024) {
         lastGcHintAt = now;
         gcFn();
     }
 }
-async function withSharpSlot(fn) {
-    if (activeSharpJobs >= MAX_CONCURRENT_SHARP_JOBS) {
-        await new Promise((resolve) => sharpWaiters.push(resolve));
+async function acquireBoundedLane(getActive, setActive, waiters, capacity, maxQueued, timeoutCode) {
+    if (getActive() >= capacity && waiters.length >= maxQueued) {
+        throw new Error(`${timeoutCode}_QUEUE_SATURATED`);
     }
-    activeSharpJobs += 1;
+    while (getActive() >= capacity) {
+        await new Promise((resolve, reject) => {
+            let settled = false;
+            const waiter = () => {
+                if (settled)
+                    return;
+                settled = true;
+                clearTimeout(timer);
+                resolve();
+            };
+            const timer = setTimeout(() => {
+                if (settled)
+                    return;
+                settled = true;
+                const idx = waiters.indexOf(waiter);
+                if (idx >= 0)
+                    waiters.splice(idx, 1);
+                reject(new Error(`${timeoutCode}_WAIT_TIMEOUT`));
+            }, WEBP_SLOT_WAIT_TIMEOUT_MS);
+            timer.unref();
+            waiters.push(waiter);
+        });
+    }
+    setActive(getActive() + 1);
+    return () => {
+        setActive(Math.max(0, getActive() - 1));
+        const next = waiters.shift();
+        if (next)
+            next();
+    };
+}
+async function withSharpSlot(fn) {
+    const release = await acquireBoundedLane(() => activeSharpJobs, (v) => { activeSharpJobs = v; }, sharpWaiters, MAX_CONCURRENT_SHARP_JOBS, MAX_CONCURRENT_SHARP_JOBS * 3, 'WEBP_SHARP_SLOT');
     try {
         return await fn();
     }
     finally {
-        activeSharpJobs -= 1;
-        const next = sharpWaiters.shift();
-        if (next)
-            next();
+        release();
     }
 }
 async function withHeavyStripSlot(fn) {
-    if (activeHeavyStrips >= MAX_CONCURRENT_HEAVY_STRIPS) {
-        await new Promise((resolve) => heavyStripWaiters.push(resolve));
-    }
-    activeHeavyStrips += 1;
+    const release = await acquireBoundedLane(() => activeHeavyStrips, (v) => { activeHeavyStrips = v; }, heavyStripWaiters, MAX_CONCURRENT_HEAVY_STRIPS, Math.max(3, MAX_CONCURRENT_HEAVY_STRIPS * 3), 'WEBP_HEAVY_SLOT');
     try {
         return await fn();
     }
     finally {
-        activeHeavyStrips -= 1;
-        const next = heavyStripWaiters.shift();
-        if (next)
-            next();
+        release();
+    }
+}
+async function withEncodeDeadline(fn, timeoutMs) {
+    let timer;
+    try {
+        return await Promise.race([
+            fn(),
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error('WEBP_ENCODE_DEADLINE_EXCEEDED')), timeoutMs);
+                timer.unref();
+            }),
+        ]);
+    }
+    finally {
+        if (timer)
+            clearTimeout(timer);
     }
 }
 export const DEFAULT_CHAPTER_TARGET_BYTES = 5 * 1024 * 1024; // 5 MiB average per chapter
@@ -162,6 +203,22 @@ export async function optimizePageToWebp(inputBytes, options = {}) {
             skippedReason: 'ALREADY_COMPACT_WEBP_PRESERVED',
         };
     }
+    // JPEGs already within the per-page budget do not need CPU-heavy re-encoding
+    if (preInfo.mime === 'image/jpeg' && bytesIn <= budgetBytes) {
+        return {
+            bytes: inputBytes,
+            info: preInfo,
+            mime: 'image/jpeg',
+            bytesIn,
+            bytesOut: bytesIn,
+            encodeMs: 0,
+            qualityUsed: null,
+            reencoded: false,
+            hasAlpha: false,
+            animated: false,
+            skippedReason: 'ALREADY_COMPACT_JPEG_PRESERVED',
+        };
+    }
     const t0 = performance.now();
     const useSequentialRead = pixels > 3_000_000 || bytesIn > 1_500_000;
     const sharpOpts = { limitInputPixels: 100_000_000, ...(useSequentialRead ? { sequentialRead: true } : {}) };
@@ -196,18 +253,12 @@ export async function optimizePageToWebp(inputBytes, options = {}) {
                 skippedReason: 'MULTI_FRAME_ANIMATED_PRESERVED',
             };
         }
-        // Adaptive quality ladder: single fast pass for huge stitched webtoon strips to keep RAM/CPU bounded
-        const fastEffort = pixels > 8_000_000 ? 0 : pixels > 5_000_000 ? 1 : pixels > 2_500_000 ? Math.min(effort, 2) : effort;
-        let candidateLadder;
-        if (pixels > 5_000_000 || bytesIn > budgetBytes * 8) {
-            candidateLadder = [Math.max(minQuality, 70)];
-        }
-        else if (pixels > 2_500_000 || bytesIn > budgetBytes * 4) {
-            candidateLadder = [74, minQuality];
-        }
-        else {
-            candidateLadder = [82, 76, 70, minQuality];
-        }
+        // Bounded max-2-pass quality ladder with capped effort to eliminate libvips CPU stalls
+        const cappedEffort = Math.min(effort, 2);
+        const fastEffort = pixels > 8_000_000 ? 0 : pixels > 5_000_000 ? 1 : cappedEffort;
+        const candidateLadder = pixels > 2_500_000 || bytesIn > budgetBytes * 6
+            ? [Math.max(minQuality, 70)]
+            : [76, minQuality];
         const qualityLadder = candidateLadder.filter((q, idx, arr) => q >= minQuality && arr.indexOf(q) === idx);
         if (qualityLadder.length === 0)
             qualityLadder.push(minQuality);
@@ -263,5 +314,22 @@ export async function optimizePageToWebp(inputBytes, options = {}) {
             skippedReason: null,
         };
     });
-    return isHeavyStrip ? withHeavyStripSlot(encodeTask) : encodeTask();
+    try {
+        return await withEncodeDeadline(() => (isHeavyStrip ? withHeavyStripSlot(encodeTask) : encodeTask()), WEBP_ENCODE_TIMEOUT_MS);
+    }
+    catch {
+        return {
+            bytes: inputBytes,
+            info: preInfo,
+            mime: preInfo.mime,
+            bytesIn,
+            bytesOut: bytesIn,
+            encodeMs: Math.round(performance.now() - t0),
+            qualityUsed: null,
+            reencoded: false,
+            hasAlpha: false,
+            animated: false,
+            skippedReason: 'ENCODE_TIMEOUT_FALLBACK',
+        };
+    }
 }

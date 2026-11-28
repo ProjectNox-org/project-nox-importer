@@ -358,6 +358,7 @@ export class DirectTelegramStorageProvider {
     }
     executeTelegramUpload(token, channelId, bytes, id, signal) {
         return new Promise((resolve, reject) => {
+            let settled = false;
             const boundary = `----TelegramUploadBoundary${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
             const headerPart = Buffer.from(`--${boundary}\r\n` +
                 `Content-Disposition: form-data; name="chat_id"\r\n\r\n` +
@@ -374,7 +375,32 @@ export class DirectTelegramStorageProvider {
             const footerPart = Buffer.from(`\r\n--${boundary}--\r\n`);
             const payloadBuffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
             const contentLength = headerPart.length + payloadBuffer.length + footerPart.length;
-            const req = https.request(`https://api.telegram.org/bot${token}/sendDocument`, {
+            let req;
+            const cleanup = () => {
+                clearTimeout(hardDeadlineTimer);
+                signal?.removeEventListener('abort', abortRequest);
+            };
+            const settleResolve = (value) => {
+                if (settled)
+                    return;
+                settled = true;
+                cleanup();
+                resolve(value);
+            };
+            const settleReject = (reason) => {
+                if (settled)
+                    return;
+                settled = true;
+                cleanup();
+                reject(reason);
+            };
+            const hardDeadlineTimer = setTimeout(() => {
+                const err = new Error('Upload hard deadline exceeded after 50000ms');
+                req?.destroy(err);
+                settleReject(err);
+            }, 50_000);
+            hardDeadlineTimer.unref();
+            req = https.request(`https://api.telegram.org/bot${token}/sendDocument`, {
                 method: 'POST',
                 agent: this.httpsAgent,
                 headers: {
@@ -386,12 +412,23 @@ export class DirectTelegramStorageProvider {
             }, (res) => {
                 const chunks = [];
                 res.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+                res.on('aborted', () => {
+                    settleReject(new Error('Telegram response aborted before completion'));
+                });
+                res.on('close', () => {
+                    if (!settled) {
+                        settleReject(new Error('Telegram response socket closed before end'));
+                    }
+                });
+                res.on('error', (err) => {
+                    settleReject(err);
+                });
                 res.on('end', () => {
                     const raw = Buffer.concat(chunks).toString('utf8');
                     try {
                         const data = JSON.parse(raw);
                         if (res.statusCode === 200 && data.ok && data.result?.document?.file_id) {
-                            resolve({
+                            settleResolve({
                                 fileId: data.result.document.file_id,
                                 messageId: data.result.message_id || 0,
                             });
@@ -400,40 +437,60 @@ export class DirectTelegramStorageProvider {
                         const err = new Error(data.description || `Telegram upload failed HTTP ${res.statusCode}`);
                         err.statusCode = res.statusCode;
                         err.parameters = data.parameters;
-                        reject(err);
+                        settleReject(err);
                     }
-                    catch (jsonErr) {
+                    catch {
                         const err = new Error(`Invalid JSON response from Telegram: ${raw.slice(0, 100)}`);
                         err.statusCode = res.statusCode;
-                        reject(err);
+                        settleReject(err);
                     }
                 });
             });
             req.on('timeout', () => {
-                req.destroy(new Error(`Upload timed out after 45000ms`));
+                const err = new Error('Upload timed out after 45000ms');
+                req.destroy(err);
+                settleReject(err);
             });
-            const abortRequest = () => req.destroy(signal?.reason || new Error('Telegram upload aborted'));
+            const abortRequest = () => {
+                const reason = signal?.reason || new Error('Telegram upload aborted');
+                req.destroy(reason instanceof Error ? reason : new Error(String(reason)));
+                settleReject(reason);
+            };
+            if (signal?.aborted) {
+                abortRequest();
+                return;
+            }
             signal?.addEventListener('abort', abortRequest, { once: true });
-            req.on('close', () => signal?.removeEventListener('abort', abortRequest));
+            req.on('close', () => {
+                if (!settled)
+                    settleReject(new Error('Telegram request socket closed prematurely'));
+            });
             req.on('error', (err) => {
-                reject(err);
+                settleReject(err);
             });
             const writeAsync = async () => {
                 await this.bandwidthLimiter.acquire(payloadBuffer.length, signal);
+                if (settled)
+                    return;
                 if (!req.write(headerPart)) {
                     await this.waitForDrain(req, signal);
                 }
+                if (settled)
+                    return;
                 if (!req.write(payloadBuffer)) {
                     await this.waitForDrain(req, signal);
                 }
+                if (settled)
+                    return;
                 if (!req.write(footerPart)) {
                     await this.waitForDrain(req, signal);
                 }
-                req.end();
+                if (!settled)
+                    req.end();
             };
             writeAsync().catch((err) => {
                 req.destroy(err);
-                reject(err);
+                settleReject(err);
             });
         });
     }
@@ -441,29 +498,48 @@ export class DirectTelegramStorageProvider {
         if (signal?.aborted)
             return Promise.reject(signal.reason || new Error('Telegram upload aborted'));
         return new Promise((resolve, reject) => {
-            const onDrain = () => {
+            const cleanup = () => {
+                req.removeListener('drain', onDrain);
+                req.removeListener('error', onError);
+                req.removeListener('close', onClose);
                 signal?.removeEventListener('abort', onAbort);
+            };
+            const onDrain = () => {
+                cleanup();
                 resolve();
             };
+            const onError = (err) => {
+                cleanup();
+                reject(err);
+            };
+            const onClose = () => {
+                cleanup();
+                reject(new Error('Telegram socket closed while draining upload body'));
+            };
             const onAbort = () => {
-                req.removeListener('drain', onDrain);
+                cleanup();
                 reject(signal?.reason || new Error('Telegram upload aborted'));
             };
             req.once('drain', onDrain);
+            req.once('error', onError);
+            req.once('close', onClose);
             signal?.addEventListener('abort', onAbort, { once: true });
         });
     }
     async upload(bytes, mime, id, chapterId, signal) {
-        await this.acquireGlobalSlot(signal);
+        const effectiveSignal = signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(90_000)])
+            : AbortSignal.timeout(90_000);
+        await this.acquireGlobalSlot(effectiveSignal);
         const maxAttempts = 3;
         let lastError;
         const excludedShards = new Set();
         try {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                const { bot, shard } = await this.reserveDestination(excludedShards, signal);
+                const { bot, shard } = await this.reserveDestination(excludedShards, effectiveSignal);
                 const startTime = Date.now();
                 try {
-                    const result = await this.executeTelegramUpload(bot.token, shard.channelId, bytes, id, signal);
+                    const result = await this.executeTelegramUpload(bot.token, shard.channelId, bytes, id, effectiveSignal);
                     const duration = Date.now() - startTime;
                     // AIMD Additive Increase on Bot
                     bot.activeUploads = Math.max(0, bot.activeUploads - 1);
