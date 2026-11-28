@@ -149,7 +149,7 @@ export function resolvePemInput(raw?: string): string | undefined {
   return undefined;
 }
 
-function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, applicationName: string,
+export function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, applicationName: string,
   connectionTimeoutMillis: number, queryTimeoutMillis: number, sessionOptions = '', disableParallelWorkers = true,
   idleTimeoutMillis = 30000): pg.PoolConfig {
   if (!cfg.YUGABYTE_HOST || !cfg.YUGABYTE_USER || !cfg.YUGABYTE_PASSWORD) {
@@ -218,7 +218,7 @@ function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, app
     idleTimeoutMillis,
     query_timeout: queryTimeoutMillis,
     keepAlive: true,
-    keepAliveInitialDelayMillis: 10000,
+    keepAliveInitialDelayMillis: useDirectSsl ? 30_000 : 10_000,
     ssl: sslConfig,
     // pg@8.23 ConnectionParameters reads lowercase `sslnegotiation` for direct TLS / mTLS
     ...(useDirectSsl ? { sslnegotiation: 'direct' } : {}),
@@ -228,6 +228,19 @@ function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, app
     // than the parallel-worker hint; retain all safeguards in the main pool.
     options: `${disableParallelWorkers ? '-c max_parallel_workers_per_gather=0 ' : ''}-c statement_timeout=${queryTimeoutMillis} -c idle_in_transaction_session_timeout=45000 ${sessionOptions}`.trim(),
   } as pg.PoolConfig;
+}
+
+export function mtlsPoolTimeouts(mtlsEnabled: boolean, lane: 'direct' | 'metadata'): {
+  connectionTimeoutMillis: number;
+  idleTimeoutMillis: number;
+} {
+  if (mtlsEnabled) {
+    return { connectionTimeoutMillis: 45_000, idleTimeoutMillis: 300_000 };
+  }
+  return {
+    connectionTimeoutMillis: 25_000,
+    idleTimeoutMillis: lane === 'metadata' ? 15_000 : 5_000,
+  };
 }
 
 /**
@@ -241,16 +254,17 @@ export function createYugabyteMetadataPool(): pg.Pool {
     return getYugabytePool();
   }
   if (metadataPool) return metadataPool;
+  const timeouts = mtlsPoolTimeouts(true, 'metadata');
   metadataPool = new pg.Pool(
     yugabytePoolOptions(
       cfg,
       2,
       poolApplicationName('metadata'),
-      25_000,
+      timeouts.connectionTimeoutMillis,
       25_000,
       '',
       true,
-      15_000,
+      timeouts.idleTimeoutMillis,
     ),
   );
   metadataPool.on('error', (err) => {
@@ -265,15 +279,16 @@ export function getYugabytePool(): pg.Pool {
   const cfg = getConfig();
   const configuredMax = cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '1', 10);
   const directPoolMax = Math.max(1, Math.min(10, configuredMax));
+  const timeouts = mtlsPoolTimeouts(Boolean(cfg.DB_MTLS_ENABLED), 'direct');
   pool = new pg.Pool(yugabytePoolOptions(
     cfg,
     directPoolMax,
     poolApplicationName('direct'),
-    25_000,
+    timeouts.connectionTimeoutMillis,
     25_000,
     '',
     true,
-    5_000,
+    timeouts.idleTimeoutMillis,
   ));
 
   pool.on('error', (err) => {
