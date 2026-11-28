@@ -743,15 +743,15 @@ export class ImporterLiteRuntime {
     if (normalizedCap >= 3 && normalizedCap <= 7) {
       const highRam = this.containerRamMiB >= 600 && normalizedCap >= 5;
       return {
-        pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, highRam ? 40 : (normalizedCap >= 5 ? 32 : 20)),
-        pageByteCapacity: (highRam ? 96 : (normalizedCap >= 5 ? 56 : 40)) * 1024 * 1024,
+        pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, highRam ? 32 : (normalizedCap >= 5 ? 32 : 20)),
+        pageByteCapacity: (highRam ? 64 : (normalizedCap >= 5 ? 56 : 40)) * 1024 * 1024,
       };
     }
     return {
       pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, Math.max(8, normalizedCap * 8)),
       pageByteCapacity: normalizedCap <= 2
         ? 48 * 1024 * 1024
-        : (this.containerRamMiB >= 600 ? 128 * 1024 * 1024 : LITE_PAGE_BUFFER_BUDGET_BYTES),
+        : (this.containerRamMiB >= 600 ? 64 * 1024 * 1024 : LITE_PAGE_BUFFER_BUDGET_BYTES),
     };
   }
 
@@ -774,7 +774,7 @@ export class ImporterLiteRuntime {
     this.bufferedPages = new AsyncSemaphore(this.configuredPageBufferCapacity, 'lite_global_page_buffers');
     this.containerRamMiB = detectContainerRamMiB();
     const initialNormalPageBytes = this.containerRamMiB >= 600
-      ? 128 * 1024 * 1024
+      ? 64 * 1024 * 1024
       : LITE_PAGE_BUFFER_BUDGET_BYTES;
     this.bufferedPageBytes = new PageByteBudget(initialNormalPageBytes);
     this.memoryPressureGuard = new LiteMemoryPressureGuard(
@@ -891,7 +891,7 @@ export class ImporterLiteRuntime {
     // Sample RSS independently from the 60-second diagnostic heartbeat. The
     // fixed byte ceiling makes overshoot bounded; this one-second brake then
     // prevents the next page wave from rebuilding pressure.
-    const memoryTimer = setInterval(() => this.refreshMemoryPressure(), 1_000);
+    const memoryTimer = setInterval(() => this.refreshMemoryPressure(), 500);
     memoryTimer.unref(); this.timers.push(memoryTimer);
     this.scheduleMetadataTurn();
     const sourceMetadataTimer = setInterval(() => {
