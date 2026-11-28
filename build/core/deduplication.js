@@ -3,7 +3,7 @@ import { decodeHtmlEntities } from '../sources/common/html-utils.js';
 import { evaluateMetadataMatchEvidence, matchWorkCandidate, getCanonicalSynonyms } from './matching.js';
 import { CANONICAL_ADULT_TAG_NAME, CANONICAL_ADULT_TAG_SLUG, canonicalAdultTagName } from './tag-normalization.js';
 import { mergeAlternativeTitles } from './alternative-titles.js';
-import { isConsecratedProperTitle, isPtBrTitle, OWNER_EDITORIAL_TITLE_PREFERENCES, resolveAutomaticPtBrTitlePromotion, } from './ptbr-title-localization.js';
+import { isConsecratedProperTitle, isProtectedEditorialProvenance, isPtBrTitle, OWNER_EDITORIAL_TITLE_PREFERENCES, resolveAutomaticPtBrTitlePromotion, } from './ptbr-title-localization.js';
 export const ADULT_SOURCES = new Set([
     'hanamiheaven',
     'hipercool',
@@ -952,8 +952,8 @@ export class DeduplicationEngine {
                 return false;
             if (Array.isArray(candidateValue) && candidateValue.length === 0)
                 return false;
-            // 2. Manual edit, owner preference, localized PT-BR or protected title is strictly protected from reversion
-            if (prov[fieldName]?.source === 'manual')
+            // 2. Manual edit, Third-AI recovery, owner preference, localized PT-BR or protected title is strictly protected
+            if (isProtectedEditorialProvenance(prov[fieldName]))
                 return false;
             if (fieldName === 'title' &&
                 (prov.title?.localized_ptbr === true ||
@@ -1111,8 +1111,12 @@ export class DeduplicationEngine {
         // A healthy canonical cover is always preserved, so defer the source
         // download/upload until it is actually needed by a new or unhealthy work.
         if (candidate.coverId || candidate.loadCoverId) {
-            if (prov.cover?.source === 'manual') {
-                this.logger.debug('Preserving manual cover for work', { workId });
+            const existingCoverProv = prov.cover;
+            const existingCoverIsPtBr = existingCoverProv?.has_ptbr_title === true || existingCoverProv?.cover_tier === 1;
+            const incomingCoverIsVerifiedPtBr = candidate.coverHasVerifiedPtBrTitle === true &&
+                (candidate.coverVisualScore === undefined || candidate.coverVisualScore >= 40);
+            if (isProtectedEditorialProvenance(existingCoverProv)) {
+                this.logger.debug('Preserving protected manual/Third-AI cover for work', { workId });
             }
             else if (work.cover_id) {
                 // Verify if existing canonical cover is healthy in media table
@@ -1126,7 +1130,34 @@ export class DeduplicationEngine {
                     (existingMedia.bytes || 0) >= 1500 &&
                     (existingMedia.width || 0) >= 100 &&
                     (existingMedia.height || 0) >= 140;
-                if (isHealthy) {
+                if (isHealthy && existingCoverIsPtBr && !incomingCoverIsVerifiedPtBr) {
+                    this.logger.debug('Preserving healthy verified PT-BR canonical cover against foreign overwrite', {
+                        workId,
+                        coverId: work.cover_id,
+                        source,
+                    });
+                }
+                else if (isHealthy && !existingCoverIsPtBr && incomingCoverIsVerifiedPtBr) {
+                    const coverId = await this.resolveCandidateCover(candidate);
+                    if (coverId && coverId !== work.cover_id) {
+                        updates.cover_id = coverId;
+                        prov.cover = {
+                            source,
+                            updated_at: now,
+                            has_ptbr_title: true,
+                            cover_tier: candidate.coverTier ?? 1,
+                            verification_method: candidate.coverVerificationMethod ?? 'ocr_verified',
+                            previous_cover_id: work.cover_id,
+                        };
+                        this.logger.info('Upgrading foreign healthy cover to verified PT-BR cover', {
+                            workId,
+                            oldCoverId: work.cover_id,
+                            newCoverId: coverId,
+                            source,
+                        });
+                    }
+                }
+                else if (isHealthy) {
                     // Preserve healthy canonical cover - do NOT overwrite
                     this.logger.debug('Preserving healthy canonical cover for work', {
                         workId,
@@ -1140,7 +1171,17 @@ export class DeduplicationEngine {
                     const coverId = await this.resolveCandidateCover(candidate);
                     if (coverId) {
                         updates.cover_id = coverId;
-                        prov.cover = { source, updated_at: now };
+                        prov.cover = {
+                            source,
+                            updated_at: now,
+                            ...(incomingCoverIsVerifiedPtBr
+                                ? {
+                                    has_ptbr_title: true,
+                                    cover_tier: candidate.coverTier ?? 1,
+                                    verification_method: candidate.coverVerificationMethod ?? 'ocr_verified',
+                                }
+                                : {}),
+                        };
                         this.logger.info('Replacing broken/unhealthy cover with valid candidate cover', {
                             workId,
                             oldCoverId: work.cover_id,
@@ -1155,7 +1196,17 @@ export class DeduplicationEngine {
                 const coverId = await this.resolveCandidateCover(candidate);
                 if (coverId) {
                     updates.cover_id = coverId;
-                    prov.cover = { source, updated_at: now };
+                    prov.cover = {
+                        source,
+                        updated_at: now,
+                        ...(incomingCoverIsVerifiedPtBr
+                            ? {
+                                has_ptbr_title: true,
+                                cover_tier: candidate.coverTier ?? 1,
+                                verification_method: candidate.coverVerificationMethod ?? 'ocr_verified',
+                            }
+                            : {}),
+                    };
                     this.logger.info('Adopting valid cover for work with null cover', {
                         workId,
                         coverId,

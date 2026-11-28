@@ -13,6 +13,7 @@ import { performance } from 'node:perf_hooks';
 const logger = new Logger('YugabyteDirect');
 
 let pool: pg.Pool | null = null;
+let metadataPool: pg.Pool | null = null;
 let cachedDeployIdentity: string | null = null;
 
 function poolApplicationName(lane: 'direct' | 'metadata'): string {
@@ -225,16 +226,37 @@ function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, app
     // Yugabyte rejects this deployment's startup packet when four -c flags
     // are present. The isolated P2 pool needs the batched-loop setting more
     // than the parallel-worker hint; retain all safeguards in the main pool.
-    options: `${disableParallelWorkers ? '-c max_parallel_workers_per_gather=0 ' : ''}-c statement_timeout=${queryTimeoutMillis} -c idle_in_transaction_session_timeout=15000 ${sessionOptions}`.trim(),
+    options: `${disableParallelWorkers ? '-c max_parallel_workers_per_gather=0 ' : ''}-c statement_timeout=${queryTimeoutMillis} -c idle_in_transaction_session_timeout=45000 ${sessionOptions}`.trim(),
   } as pg.PoolConfig;
 }
 
 /**
- * Unified metadata pool with the primary Yugabyte pool to enforce a strict hard cap of
- * at most 2 server connections on YugabyteDB Aeon (preventing Connection Manager 60% saturation).
+ * Isolates background metadata / P0 discovery queries on OVH PG 18.7 mTLS (2 dedicated
+ * connections) so chapter workers never queue behind background probes, while keeping
+ * YugabyteDB Aeon unified at <=2 server connections when mTLS PG18 is inactive.
  */
 export function createYugabyteMetadataPool(): pg.Pool {
-  return getYugabytePool();
+  const cfg = getConfig();
+  if (!cfg.DB_MTLS_ENABLED) {
+    return getYugabytePool();
+  }
+  if (metadataPool) return metadataPool;
+  metadataPool = new pg.Pool(
+    yugabytePoolOptions(
+      cfg,
+      2,
+      poolApplicationName('metadata'),
+      25_000,
+      25_000,
+      '',
+      true,
+      15_000,
+    ),
+  );
+  metadataPool.on('error', (err) => {
+    logger.warn('Unexpected error on idle metadata pool client', { error: err.message });
+  });
+  return metadataPool;
 }
 
 export function getYugabytePool(): pg.Pool {
@@ -242,7 +264,7 @@ export function getYugabytePool(): pg.Pool {
 
   const cfg = getConfig();
   const configuredMax = cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '1', 10);
-  const directPoolMax = Math.max(1, Math.min(8, configuredMax));
+  const directPoolMax = Math.max(1, Math.min(10, configuredMax));
   pool = new pg.Pool(yugabytePoolOptions(
     cfg,
     directPoolMax,
@@ -327,6 +349,10 @@ export function getYugabytePool(): pg.Pool {
 }
 
 export async function closeYugabytePool(): Promise<void> {
+  if (metadataPool && metadataPool !== pool) {
+    await metadataPool.end().catch(() => {});
+    metadataPool = null;
+  }
   if (pool) {
     await pool.end();
     pool = null;
