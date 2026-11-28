@@ -22,6 +22,12 @@ for (const envPath of candidateEnvPaths) {
         dotenv.config({ path: envPath });
     }
 }
+for (const baseEnvPath of candidateEnvPaths) {
+    const overridePath = `${baseEnvPath}.pg18.override`;
+    if (fs.existsSync(overridePath)) {
+        dotenv.config({ path: overridePath, override: true });
+    }
+}
 dotenv.config();
 const ConfigSchema = z.object({
     SUPABASE_URL: z.string().url().default('https://placeholder.supabase.co'),

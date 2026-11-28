@@ -10,6 +10,16 @@ on:
         required: false
         default: 'false'
         type: boolean
+      action:
+        description: 'Lifecycle action: status, stop, start, restart'
+        required: false
+        default: 'status'
+        type: choice
+        options:
+          - status
+          - stop
+          - start
+          - restart
 
 permissions:
   contents: read
@@ -30,5 +40,7 @@ jobs:
           DISCLOUD_TOKEN: ${{ secrets.DISCLOUD_TOKEN }}
           DISCLOUD_APP_ID: '1788873398156'
           FORCE_RESTART: ${{ inputs.force_restart }}
+          DISCLOUD_ACTION: ${{ inputs.action || 'status' }}
+          DISCLOUD_MAINTENANCE_HOLD: ${{ vars.DISCLOUD_MAINTENANCE_HOLD || 'false' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/discloud-status.mjs

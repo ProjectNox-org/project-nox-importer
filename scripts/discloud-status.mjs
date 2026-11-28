@@ -127,8 +127,35 @@ async function check() {
   console.log('Reader Probe:', JSON.stringify(reader));
 
   const recentFatalOom = terminalLines.slice(-60).some(l => /JavaScript heap out of memory|FATAL ERROR:/i.test(l));
-  const force = process.env.FORCE_RESTART === 'true';
+  const action = (process.env.DISCLOUD_ACTION || 'status').toLowerCase();
+  const force = process.env.FORCE_RESTART === 'true' || action === 'restart';
+  const maintenanceHold = process.env.DISCLOUD_MAINTENANCE_HOLD === 'true';
   let restarted = false;
+
+  if (action === 'stop') {
+    console.log('Maintenance STOP requested; stopping DIScloud container...');
+    const stopRes = await fetch(`https://api.discloud.app/v2/app/${appId}/stop`, { method: 'PUT', headers, signal: AbortSignal.timeout(15000) });
+    if (!stopRes.ok) throw new Error(`DIScloud stop failed: HTTP ${stopRes.status} ${await stopRes.text()}`);
+    console.log('Stop response:', await stopRes.text());
+    await new Promise(resolve => setTimeout(resolve, 4000));
+    const checkAfter = await fetch(`https://api.discloud.app/v2/app/${appId}/status`, { headers, signal: AbortSignal.timeout(10000) });
+    const afterStatus = discloudStatus(checkAfter.ok, await checkAfter.json());
+    console.log(`Container status after stop: ${afterStatus}`);
+    return;
+  }
+
+  if (action === 'start') {
+    console.log('Maintenance START requested; starting DIScloud container...');
+    const startRes = await fetch(`https://api.discloud.app/v2/app/${appId}/start`, { method: 'PUT', headers, signal: AbortSignal.timeout(15000) });
+    if (!startRes.ok) throw new Error(`DIScloud start failed: HTTP ${startRes.status} ${await startRes.text()}`);
+    console.log('Start response:', await startRes.text());
+    return;
+  }
+
+  if (maintenanceHold) {
+    console.log('DISCLOUD_MAINTENANCE_HOLD=true active: skipping auto-restart and auto-deploy.');
+    return;
+  }
 
   if (initialStatus === 'OFFLINE' || force) {
     if (!force) {
@@ -151,7 +178,7 @@ async function check() {
   let deployState = { status: 'UNKNOWN', shouldTrigger: false, reason: 'Target commit not determined' };
   let deployTriggered = false;
 
-  const repo = process.env.GITHUB_REPOSITORY || 'Awerkori/project-nox-importer';
+  const repo = process.env.GITHUB_REPOSITORY || 'ProjectNox-org/project-nox-importer';
   const ghToken = process.env.GITHUB_TOKEN;
 
   if (ghToken) {
