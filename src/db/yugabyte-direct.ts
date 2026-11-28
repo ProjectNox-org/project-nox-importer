@@ -196,7 +196,7 @@ export function getYugabytePool(): pg.Pool {
 
   const cfg = getConfig();
   const configuredMax = cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '1', 10);
-  const directPoolMax = Math.max(1, Math.min(1, configuredMax));
+  const directPoolMax = Math.max(1, Math.min(8, configuredMax));
   pool = new pg.Pool(yugabytePoolOptions(
     cfg,
     directPoolMax,

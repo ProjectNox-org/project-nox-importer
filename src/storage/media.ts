@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { StorageProvider } from './provider.js';
 import { Logger } from '../core/logger.js';
+import { optimizePageToWebp } from './webp-optimizer.js';
 
 const logger = new Logger('MediaPipeline');
 
@@ -171,15 +172,17 @@ export interface StoredMediaResult {
 export interface ProcessMediaOptions {
   skipDbInsert?: boolean;
   skipDedupLookup?: boolean;
+  skipWebpOptimization?: boolean;
   signal?: AbortSignal;
 }
 
 /**
  * Process a single image:
  * 1. Validate binary structure & dimensions.
- * 2. Calculate SHA-256.
- * 3. Check public.media for existing hash (deduplication) unless skipped.
- * 4. If not found, upload via StorageProvider and insert into public.media (or return descriptor for batching).
+ * 2. Adaptively optimize to compact WebP (~5 MB/chapter target) when applicable.
+ * 3. Calculate SHA-256.
+ * 4. Check public.media for existing hash (deduplication) unless skipped.
+ * 5. If not found, upload via StorageProvider and insert into public.media (or return descriptor for batching).
  */
 export async function processAndStoreMedia(
   supabase: SupabaseClient,
@@ -190,8 +193,18 @@ export async function processAndStoreMedia(
   chapterId?: string,
   options?: ProcessMediaOptions
 ): Promise<StoredMediaResult> {
-  const info = inspectImage(bytes);
-  const sha256 = calculateSha256(bytes);
+  let effectiveBytes = bytes;
+  let info = inspectImage(effectiveBytes);
+  if (!options?.skipWebpOptimization) {
+    try {
+      const opt = await optimizePageToWebp(effectiveBytes, { pageCount: 15 });
+      effectiveBytes = opt.bytes;
+      info = opt.info;
+    } catch {
+      // Preserve pre-validated bytes for minimal synthetic fixtures
+    }
+  }
+  const sha256 = calculateSha256(effectiveBytes);
 
   // 1. Deduplication lookup (optional, skipped during batch chapter ingestion to avoid distributed seq scans)
   if (!options?.skipDedupLookup) {
@@ -222,7 +235,7 @@ export async function processAndStoreMedia(
 
   // 2. Upload to storage provider
   const mediaId = crypto.randomUUID();
-  const providerKey = await storage.upload(bytes, info.mime, mediaId, chapterId, options?.signal);
+  const providerKey = await storage.upload(effectiveBytes, info.mime, mediaId, chapterId, options?.signal);
 
   // 3. Prepare media record
   const botRef = storage.getLastBotReference?.(mediaId) || 'MANGA_STORAGE_01';
@@ -236,7 +249,7 @@ export async function processAndStoreMedia(
     mime: info.mime,
     width: info.width,
     height: info.height,
-    bytes: bytes.length,
+    bytes: effectiveBytes.length,
     sha256,
     created_by: userId,
     storage_ready: true,
@@ -258,7 +271,7 @@ export async function processAndStoreMedia(
     reused: false,
     width: info.width,
     height: info.height,
-    bytes: bytes.length,
+    bytes: effectiveBytes.length,
     mime: info.mime,
     mediaRecord,
   };
