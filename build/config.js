@@ -22,6 +22,12 @@ for (const envPath of candidateEnvPaths) {
         dotenv.config({ path: envPath });
     }
 }
+for (const baseEnvPath of candidateEnvPaths) {
+    const overridePath = `${baseEnvPath}.pg18.override`;
+    if (fs.existsSync(overridePath)) {
+        dotenv.config({ path: overridePath, override: true });
+    }
+}
 dotenv.config();
 const ConfigSchema = z.object({
     SUPABASE_URL: z.string().url().default('https://placeholder.supabase.co'),
@@ -37,18 +43,18 @@ const ConfigSchema = z.object({
     POLL_INTERVAL_SECONDS: z.coerce.number().int().min(5).default(60),
     QUEUE_LEASE_DURATION_SECONDS: z.coerce.number().int().min(30).default(600),
     QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
-    MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(128).default(2),
-    // Lite does not inherit the legacy chapter-worker setting. The controlled
-    // worker capacity remains strictly bounded to 2 to preserve YugabyteDB headroom.
-    LITE_CHAPTER_WORKERS: z.coerce.number().int().min(1).max(32).default(2),
-    ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(2),
-    // Raising this ceiling requires a measured production ramp.
-    TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(2),
+    MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(128).default(4),
+    // V3: allow bounded multi-worker pipeline (4 workers + WebP semaphore + short TXs)
+    // while keeping RSS <= 520 MiB and preserving site headroom via SiteProtectionController.
+    LITE_CHAPTER_WORKERS: z.coerce.number().int().min(1).max(32).default(4),
+    ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(4),
+    TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(8),
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(4),
-    // Aeon has only 13 backend slots. These are hard per-process ceilings;
-    // deployment overlap must still be prevented by the runtime leader. Direct
-    // pool is capped to 1 and metadata pool to 1 to reserve headroom for the site.
-    DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(2).default(1),
+    WEBP_MAX_CONCURRENT: z.coerce.number().int().min(1).max(4).default(3),
+    WEBP_MAX_CONCURRENT_HEAVY: z.coerce.number().int().min(1).max(2).default(1),
+    // V3 PostgreSQL OVH pool headroom: up to 4 connections default (max 6) eliminates poolMax=1
+    // serialization bottleneck while protecting public Reader/Lançamentos queries.
+    DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(6).default(4),
     METADATA_DB_POOL_MAX: z.coerce.number().int().min(1).max(1).default(1),
     // At the measured 52.75 MiB median chapter size, the former 4 MiB/s global
     // ceiling could never reach the 8/min acceptance floor (4.55/min before
@@ -76,6 +82,12 @@ const ConfigSchema = z.object({
     YUGABYTE_PASSWORD: z.string().min(1, 'YUGABYTE_PASSWORD environment variable is required'),
     YUGABYTE_DATABASE: z.string().default('project_nox_prod'),
     YUGABYTE_SSL_CERT: z.string().default('certs/yugabyte-root.crt'),
+    YUGABYTE_SSL_MODE: z.enum(['verify-full', 'require', 'disable']).default('verify-full'),
+    DB_MTLS_ENABLED: z.coerce.boolean().default(false),
+    DB_MTLS_CA_CERT: z.string().optional(),
+    DB_MTLS_CLIENT_CERT: z.string().optional(),
+    DB_MTLS_CLIENT_KEY: z.string().optional(),
+    DB_MTLS_SERVERNAME: z.string().default('pg-importer.nox.internal'),
 });
 let _config = null;
 export function getConfig() {

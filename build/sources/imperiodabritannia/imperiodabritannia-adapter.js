@@ -222,17 +222,33 @@ export class ImperioDaBritanniaAdapter {
             .filter((work) => work?.id)
             .map((work) => this.toSummary(work));
     }
-    async work(sourceWorkId) {
+    async work(sourceWorkId, requireChapters = false) {
         if (this.transport === fetch && this.ensureCatalogLoaded()) {
             const cached = this.catalogById.get(String(sourceWorkId)) || this.catalogBySlug.get(String(sourceWorkId));
-            if (cached)
+            if (cached && (!requireChapters || (Array.isArray(cached.capitulos) && cached.capitulos.length > 0))) {
                 return cached;
+            }
         }
         const response = await this.request(`/obras/${encodeURIComponent(sourceWorkId)}`);
-        return response.obra || response.dados || response.data || response;
+        const work = response.obra || response.dados || response.data || response;
+        if (requireChapters && (!Array.isArray(work?.capitulos) || work.capitulos.length === 0)) {
+            const targetId = work?.id ? String(work.id) : sourceWorkId;
+            try {
+                const capResponse = await this.request(`/obras/${encodeURIComponent(targetId)}/capitulos`);
+                const caps = Array.isArray(capResponse)
+                    ? capResponse
+                    : capResponse?.capitulos || capResponse?.dados || capResponse?.data || [];
+                if (Array.isArray(caps) && caps.length > 0) {
+                    return { ...work, capitulos: caps };
+                }
+            }
+            catch {
+                // Fallback to work object as returned when /capitulos endpoint fails
+            }
+        }
+        return work;
     }
-    async fetchWorkSnapshot(sourceWorkId, _signal) {
-        const work = await this.work(sourceWorkId);
+    buildWorkDetails(work, sourceWorkId) {
         const title = String(work.nome || work.title || sourceWorkId);
         const status = String(work.status_nome || '').toLowerCase();
         const rawAlt = work.titulo_alternativo || work.titulos_alternativos || work.nome_alternativo || work.alternative_titles || work.alternativeTitles || work.aliases;
@@ -270,7 +286,7 @@ export class ImperioDaBritanniaAdapter {
                 }
             }
         }
-        const details = {
+        return {
             sourceWorkId: String(work.id || sourceWorkId),
             title,
             slug: String(work.slug || slugify(title)),
@@ -284,6 +300,10 @@ export class ImperioDaBritanniaAdapter {
             alternativeTitles: alternativeTitles && alternativeTitles.length > 0 ? alternativeTitles : undefined,
             raw: work,
         };
+    }
+    async fetchWorkSnapshot(sourceWorkId, _signal) {
+        const work = await this.work(sourceWorkId, true);
+        const details = this.buildWorkDetails(work, sourceWorkId);
         const chapters = (work.capitulos || []).map((chapter) => {
             const display = String(chapter.numero ?? chapter.id);
             return {
@@ -298,7 +318,8 @@ export class ImperioDaBritanniaAdapter {
         return { details, chapters };
     }
     async fetchWorkDetails(sourceWorkId) {
-        return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+        const work = await this.work(sourceWorkId, false);
+        return this.buildWorkDetails(work, sourceWorkId);
     }
     async fetchChapters(sourceWorkId) {
         return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;

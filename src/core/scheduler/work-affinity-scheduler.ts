@@ -812,38 +812,11 @@ export class WorkAffinityScheduler {
       worksTested: 0,
     };
 
-    // -------------------------------------------------------------
-    // LANE STAFF_FORCED: Explicit Staff Priority
-    // Any eligible STAFF_FORCED job (priority >= 1000, staffForced=true,
-    // or active staff request) wins normal selection. It still uses exactly
-    // the same source, media, DB and chapter permits as every other lane.
-    // -------------------------------------------------------------
     const fullWorkIds = this.getFullInFlightWorkIds(config.maxInflightPerWork);
-    // Staff is absolute while it has claimable work. Once it is exhausted (or
-    // temporarily unclaimable), continue in the fixed P0 -> P1 -> P2 order.
-    const hasStaffCandidate = await this.hasStaffForcedCandidate();
-    let staffForcedJob: any | null = null;
-    if (hasStaffCandidate) {
-      const tStaff0 = performance.now();
-      staffForcedJob = await this.claimStaffForcedJob(this.pool, {
-        workerId: options.workerId,
-        leaseMin,
-        allowedSources,
-        disallowedWorkIds: fullWorkIds,
-        telemetry,
-      });
-      telemetry.staffCheckMs = Math.round((performance.now() - tStaff0) * 10) / 10;
-    }
-
-    if (staffForcedJob) {
-      return this.completeStaffClaim(staffForcedJob, t0, telemetry);
-    }
-    this.staffConsecutiveClaims = 0;
 
     // -------------------------------------------------------------
-    // LANE P0: Fresh New Releases (Priority >= 100)
-    // P0 is selected whenever it has an eligible frontier.  Fairness is
-    // within each priority lane; it never grants P1/P2 a bypass over P0.
+    // LANE P0: Fresh New Releases (Priority 100..999) — V3 Order: P0 > STAFF > P1 > P2
+    // P0 is strictly top priority ahead of STAFF, P1 and P2.
     // -------------------------------------------------------------
     const tP0_0 = performance.now();
     let p0Job = null;
@@ -865,7 +838,6 @@ export class WorkAffinityScheduler {
 
       this.rrIndexP0 = (startIdx + 1) % p0WorkIds.length;
       if (p0Job) {
-        // It uses the same normal claim path and resource limits as all lanes.
         this.staffConsecutiveClaims = 0;
         this.highPriorityConsecutiveClaims++;
         this.genericClaimSuccesses++;
@@ -898,10 +870,6 @@ export class WorkAffinityScheduler {
         this.logDecision(decision); if (waitTimeMs > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
         return p0Job;
       } else {
-        // A candidate may have raced another runner or lost its source permit.
-        // Do not let that single miss hand the current slot to P1/P2 while a
-        // different executable P0 work is already known. The batch claim uses
-        // the same canonical fences and keeps fairness inside P0.
         const remainingP0WorkIds = p0WorkIds.filter((workId) => workId !== targetP0WorkId);
         if (remainingP0WorkIds.length > 0) {
           p0Job = await this.claimSingleJob(this.pool, {
@@ -947,14 +915,34 @@ export class WorkAffinityScheduler {
             return p0Job;
           }
         }
-        // The candidate list is now known stale. Refresh it before another
-        // P0 probe rather than repeatedly favoring the raced work.
         this.hasP0InQueue = false;
         this.cachedP0WorkIds = [];
         this.lastP0ProbeAt = 0;
       }
     }
     telemetry.p0ProbeMs = Math.round((performance.now() - tP0_0) * 10) / 10;
+
+    // -------------------------------------------------------------
+    // LANE STAFF_FORCED: Explicit Staff Priority (below P0, above P1/P2)
+    // -------------------------------------------------------------
+    const hasStaffCandidate = await this.hasStaffForcedCandidate();
+    let staffForcedJob: any | null = null;
+    if (hasStaffCandidate) {
+      const tStaff0 = performance.now();
+      staffForcedJob = await this.claimStaffForcedJob(this.pool, {
+        workerId: options.workerId,
+        leaseMin,
+        allowedSources,
+        disallowedWorkIds: fullWorkIds,
+        telemetry,
+      });
+      telemetry.staffCheckMs = Math.round((performance.now() - tStaff0) * 10) / 10;
+    }
+
+    if (staffForcedJob) {
+      return this.completeStaffClaim(staffForcedJob, t0, telemetry);
+    }
+    this.staffConsecutiveClaims = 0;
 
     // -------------------------------------------------------------
     // LANE P1: Critical Gap (Priority 90-99, unblocks STAGED barrier)

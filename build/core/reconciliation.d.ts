@@ -43,8 +43,10 @@ export declare class ExistingWorksReconciler {
     private lastReconciliationAt;
     private readonly maxRememberedReconciliations;
     private rememberReconciliation;
+    private hasYbMetricsView;
     constructor(supabase: SupabaseClient, queue: ImporterQueue, registry: SourceRegistry, siteUrl?: string | undefined);
     private sleep;
+    private runSystemSql;
     getSystemLoad(): Promise<{
         cpuPercent: number;
         activeConns: number;

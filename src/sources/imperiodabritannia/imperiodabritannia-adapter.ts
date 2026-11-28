@@ -232,17 +232,33 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
       .map((work: any) => this.toSummary(work));
   }
 
-  private async work(sourceWorkId: string): Promise<any> {
+  private async work(sourceWorkId: string, requireChapters = false): Promise<any> {
     if (this.transport === fetch && this.ensureCatalogLoaded()) {
       const cached = this.catalogById.get(String(sourceWorkId)) || this.catalogBySlug.get(String(sourceWorkId));
-      if (cached) return cached;
+      if (cached && (!requireChapters || (Array.isArray(cached.capitulos) && cached.capitulos.length > 0))) {
+        return cached;
+      }
     }
     const response = await this.request(`/obras/${encodeURIComponent(sourceWorkId)}`);
-    return response.obra || response.dados || response.data || response;
+    const work = response.obra || response.dados || response.data || response;
+    if (requireChapters && (!Array.isArray(work?.capitulos) || work.capitulos.length === 0)) {
+      const targetId = work?.id ? String(work.id) : sourceWorkId;
+      try {
+        const capResponse = await this.request(`/obras/${encodeURIComponent(targetId)}/capitulos`);
+        const caps = Array.isArray(capResponse)
+          ? capResponse
+          : capResponse?.capitulos || capResponse?.dados || capResponse?.data || [];
+        if (Array.isArray(caps) && caps.length > 0) {
+          return { ...work, capitulos: caps };
+        }
+      } catch {
+        // Fallback to work object as returned when /capitulos endpoint fails
+      }
+    }
+    return work;
   }
 
-  async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
-    const work = await this.work(sourceWorkId);
+  private buildWorkDetails(work: any, sourceWorkId: string): SourceWorkDetails {
     const title = String(work.nome || work.title || sourceWorkId);
     const status = String(work.status_nome || '').toLowerCase();
     const rawAlt = work.titulo_alternativo || work.titulos_alternativos || work.nome_alternativo || work.alternative_titles || work.alternativeTitles || work.aliases;
@@ -275,7 +291,7 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
         }
       }
     }
-    const details: SourceWorkDetails = {
+    return {
       sourceWorkId: String(work.id || sourceWorkId),
       title,
       slug: String(work.slug || slugify(title)),
@@ -289,6 +305,11 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
       alternativeTitles: alternativeTitles && alternativeTitles.length > 0 ? alternativeTitles : undefined,
       raw: work,
     };
+  }
+
+  async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
+    const work = await this.work(sourceWorkId, true);
+    const details = this.buildWorkDetails(work, sourceWorkId);
 
     const chapters: SourceChapterSummary[] = (work.capitulos || []).map((chapter: any) => {
       const display = String(chapter.numero ?? chapter.id);
@@ -306,7 +327,8 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
   }
 
   async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
-    return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+    const work = await this.work(sourceWorkId, false);
+    return this.buildWorkDetails(work, sourceWorkId);
   }
 
   async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {

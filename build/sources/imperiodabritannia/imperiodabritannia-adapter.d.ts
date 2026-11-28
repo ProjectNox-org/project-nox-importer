@@ -42,6 +42,7 @@ export declare class ImperioDaBritanniaAdapter implements SourceAdapter {
     private searchCatalog;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
     private work;
+    private buildWorkDetails;
     fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot>;
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;

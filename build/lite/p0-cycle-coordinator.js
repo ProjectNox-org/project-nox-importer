@@ -245,6 +245,14 @@ export class SqlP0CyclePersistence {
     async saveCycle(cycle) {
         await this.ensureSchema();
         const coverageEntries = Object.entries(cycle.coverage || {});
+        const countsBySourceAndStatus = {};
+        for (const [key, entry] of coverageEntries) {
+            const sourceId = entry?.source || key.split('::')[0] || 'unknown';
+            const stateKey = entry?.state || 'UNKNOWN';
+            if (!countsBySourceAndStatus[sourceId])
+                countsBySourceAndStatus[sourceId] = {};
+            countsBySourceAndStatus[sourceId][stateKey] = (countsBySourceAndStatus[sourceId][stateKey] || 0) + 1;
+        }
         const sampleSize = Math.min(coverageEntries.length, 1000);
         const coverageSample = Object.fromEntries(coverageEntries.slice(0, sampleSize));
         const metaPayload = {
@@ -260,6 +268,7 @@ export class SqlP0CyclePersistence {
                 totalEntries: coverageEntries.length,
                 truncated: coverageEntries.length > sampleSize,
                 sampleSize,
+                countsBySourceAndStatus,
             },
         };
         if (this.pkColumn === 'id') {
@@ -470,12 +479,13 @@ export class P0CycleCoordinator {
         else {
             this.persistence = new InMemoryP0CyclePersistence(this.matcher.canonicalWorks);
         }
-        this.eligibleWorkCount = options.eligibleWorkCount ?? P0_ELIGIBLE_WORK_COUNT;
-        this.canonicalWorkCount = options.canonicalWorkCount ?? P2_FROZEN_CANONICAL_WORK_COUNT;
+        this.eligibleWorkCount = options.eligibleWorkCount ?? this.matcher.canonicalWorks.length;
+        this.canonicalWorkCount = options.canonicalWorkCount ?? this.matcher.canonicalWorks.length;
         this.now = options.now ?? (() => new Date());
         this.p2AdmissionPolicy = options.p2AdmissionPolicy;
         this.onNewMappingDiscovered = options.onNewMappingDiscovered;
-        this.negativeCacheTtlMs = Math.max(0, options.negativeCacheTtlMs ?? 24 * 60 * 60 * 1000);
+        // V3.0 Contract B: do not reuse stale NOT_FOUND entries across cycles by default.
+        this.negativeCacheTtlMs = Math.max(0, options.negativeCacheTtlMs ?? 0);
     }
     /**
      * Rehydrates the last cycle, including its catalogs and audit matrix. A
@@ -712,7 +722,12 @@ export class P0CycleCoordinator {
             const processedSources = items
                 ? new Set(candidates.map((item) => item.source).filter((source) => Boolean(source)))
                 : new Set(this.sourceItems.keys());
+            const sourceFailures = this.state?.metadata?.sourceFailures || {};
             for (const source of processedSources) {
+                const recordedItems = this.sourceItems.get(source);
+                if (sourceFailures[source] || (!items && (!recordedItems || recordedItems.size === 0))) {
+                    continue;
+                }
                 for (const work of this.matcher.canonicalWorks) {
                     const entry = this.coverageEntry(source, work.id);
                     if (entry?.state === 'MAPPED')
@@ -738,13 +753,22 @@ export class P0CycleCoordinator {
         await this.persist();
         return matches;
     }
-    async completeCycle() {
+    async completeCycle(options) {
         await this.ensureLoaded();
         const state = this.requireRunning();
         const completedAt = this.now();
-        state.status = 'COMPLETED';
+        const sourceProgress = state.sourceProgress || {};
+        const sourceFailures = state.metadata?.sourceFailures || {};
+        const expectedSources = options?.expectedSources || [];
+        const hasMissingExpectedSource = expectedSources.some((source) => !(source in sourceProgress));
+        const hasFailedSource = Object.keys(sourceFailures).length > 0;
+        const hasPendingOrFailedCoverage = [...this.coverage.values()].some((entry) => entry.state === 'PENDING' || entry.state === 'FAILED');
+        const terminalStatus = hasMissingExpectedSource || hasFailedSource || hasPendingOrFailedCoverage
+            ? 'COMPLETED_WITH_PENDING'
+            : 'COMPLETED';
+        state.status = terminalStatus;
         state.completedAt = completedAt.toISOString();
-        state.metrics.status = 'COMPLETED';
+        state.metrics.status = terminalStatus;
         state.metrics.completedAt = state.completedAt;
         state.metrics.durationMs = completedAt.getTime() - new Date(state.startedAt).getTime();
         state.history = [...(state.history || []), structuredClone(state.metrics)];

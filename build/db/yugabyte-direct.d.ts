@@ -5,6 +5,7 @@ import type { GatewayJob, PublishBatchParams } from '../core/gateway-client.js';
  * raw SQL: values and unbounded query text do not belong in diagnostics.
  */
 export declare function getSqlFingerprint(queryArg: unknown): string;
+export declare function resolvePemInput(raw?: string): string | undefined;
 /**
  * Unified metadata pool with the primary Yugabyte pool to enforce a strict hard cap of
  * at most 2 server connections on YugabyteDB Aeon (preventing Connection Manager 60% saturation).

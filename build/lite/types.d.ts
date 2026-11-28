@@ -3,7 +3,7 @@
  * the legacy queue vocabulary: detail belongs in checkpoints and reasons, not
  * in ever more states.
  */
-export declare const LITE_PRIORITIES: readonly ["STAFF", "P0", "P1", "P2"];
+export declare const LITE_PRIORITIES: readonly ["P0", "STAFF", "P1", "P2"];
 export type LitePriority = (typeof LITE_PRIORITIES)[number];
 export declare const LITE_PRIORITY_RANK: Record<LitePriority, number>;
 export declare const LITE_TASK_STATES: readonly ["READY", "RUNNING", "RETRY_WAIT", "BLOCKED", "DONE"];

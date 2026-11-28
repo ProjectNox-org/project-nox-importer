@@ -37,6 +37,7 @@ export class ExistingWorksReconciler {
         }
         this.lastReconciliationAt.set(workId, now);
     }
+    hasYbMetricsView = null;
     constructor(supabase, queue, registry, siteUrl) {
         this.supabase = supabase;
         this.queue = queue;
@@ -46,24 +47,34 @@ export class ExistingWorksReconciler {
     sleep(ms) {
         return new Promise((resolve) => setTimeout(resolve, ms));
     }
+    async runSystemSql(sql) {
+        const gateway = this.supabase?.gateway;
+        const client = this.supabase?.client;
+        if (gateway && typeof gateway.sql === 'function') {
+            const res = await gateway.sql(sql);
+            return res?.rows;
+        }
+        if (client && typeof client.sql === 'function') {
+            const res = await client.sql(sql);
+            return res?.rows;
+        }
+        if (client && typeof client.query === 'function') {
+            const res = await client.query(sql);
+            return res?.rows;
+        }
+        return undefined;
+    }
     async getSystemLoad() {
         try {
-            const sql = "SELECT (SELECT metrics FROM yb_servers_metrics LIMIT 1) as metrics, (SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND datname = current_database()) as active_conns";
-            let rows;
-            const gateway = this.supabase?.gateway;
-            const client = this.supabase?.client;
-            if (gateway && typeof gateway.sql === 'function') {
-                const res = await gateway.sql(sql);
-                rows = res?.rows;
+            if (this.hasYbMetricsView === null) {
+                const probeRows = await this.runSystemSql("SELECT to_regclass('pg_catalog.yb_servers_metrics') IS NOT NULL AS has_yb");
+                const raw = probeRows?.[0]?.has_yb;
+                this.hasYbMetricsView = raw === true || raw === 't' || raw === 'true';
             }
-            else if (client && typeof client.sql === 'function') {
-                const res = await client.sql(sql);
-                rows = res?.rows;
-            }
-            else if (client && typeof client.query === 'function') {
-                const res = await client.query(sql);
-                rows = res?.rows;
-            }
+            const sql = this.hasYbMetricsView
+                ? "SELECT (SELECT metrics FROM yb_servers_metrics LIMIT 1) as metrics, (SELECT count(*)::int FROM pg_stat_activity WHERE state = 'active' AND datname = current_database()) as active_conns"
+                : "SELECT NULL::jsonb as metrics, (SELECT count(*)::int FROM pg_stat_activity WHERE state = 'active' AND datname = current_database()) as active_conns";
+            const rows = await this.runSystemSql(sql);
             if (rows && rows.length > 0) {
                 const m = rows[0]?.metrics || {};
                 const cpu = (parseFloat(m.cpu_usage_user || 0) + parseFloat(m.cpu_usage_system || 0)) * 100;

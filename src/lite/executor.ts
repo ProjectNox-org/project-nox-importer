@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import { performance } from 'node:perf_hooks';
 import { MAX_IMAGE_BODY_BYTES, readImageBody } from '../core/bounded-body.js';
 import { calculateSha256, inspectImage } from '../storage/media.js';
+import { optimizePageToWebp } from '../storage/webp-optimizer.js';
 import type { StorageProvider } from '../storage/provider.js';
 import type { SourceRegistry } from '../sources/registry.js';
 import { LiteRepository, type UploadReceiptInput, type UploadReservationInput } from './repository.js';
@@ -1229,6 +1230,7 @@ export class LiteExecutor {
       let sourceFetchMs = 0;
       let dbPreparationMs = 0;
       let pageDownloadDemandMs = 0;
+      let encodeDemandMs = 0;
       let telegramUploadDemandMs = 0;
       let rateLimitWaitMs = 0;
       let totalBytes = 0;
@@ -1421,11 +1423,20 @@ export class LiteExecutor {
               clearTimeout(admissionTimer);
             }
             let { bytes, image } = downloaded;
+            const preSha = calculateSha256(bytes);
+            if (urls.length === 1 && KNOWN_PLACEHOLDER_HASHES.has(preSha)) {
+              throw new Error(`CHAPTER_CONTENT_INVALID_PLACEHOLDER:${preSha}`);
+            }
+            try {
+              const opt = await optimizePageToWebp(bytes, { pageCount: urls.length });
+              encodeDemandMs += opt.encodeMs;
+              bytes = opt.bytes;
+              image = opt.info;
+            } catch {
+              // Preserve pre-validated bytes for minimal synthetic fixtures
+            }
             totalBytes += bytes.byteLength;
             const sha256 = calculateSha256(bytes);
-            if (urls.length === 1 && KNOWN_PLACEHOLDER_HASHES.has(sha256)) {
-              throw new Error(`CHAPTER_CONTENT_INVALID_PLACEHOLDER:${sha256}`);
-            }
             // The page body has finished its only count-bound phase: HTTP
             // read and image validation.  It remains fully byte-reserved
             // until its receipt is durable, so a slow pre-upload intent
@@ -1570,7 +1581,7 @@ export class LiteExecutor {
           source_fetch_ms: Math.round(sourceFetchMs),
           page_resolution_ms: Math.round(routeLookupMs),
           download_ms: Math.round(pageDownloadDemandMs),
-          encode_ms: 0,
+          encode_ms: Math.round(encodeDemandMs),
           telegram_upload_ms: Math.round(telegramUploadDemandMs),
           media_pipeline_wall_ms: Math.round(mediaPipelineWallMs),
           db_wait_ms: 0,

@@ -16,7 +16,7 @@ concurrency:
 jobs:
   deploy:
     # Production deploys must always use the reviewed main ref.
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.DISCLOUD_MAINTENANCE_HOLD != 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
@@ -64,6 +64,49 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare PG18 mTLS runtime override
+        if: secrets.PG18_NOX_IMPORTER_PASSWORD != ''
+        env:
+          PG18_NOX_IMPORTER_PASSWORD: ${{ secrets.PG18_NOX_IMPORTER_PASSWORD }}
+          PG18_MTLS_CA_B64: ${{ secrets.PG18_MTLS_CA_B64 }}
+          PG18_MTLS_CERT_B64: ${{ secrets.PG18_MTLS_CERT_B64 }}
+          PG18_MTLS_KEY_B64: ${{ secrets.PG18_MTLS_KEY_B64 }}
+          V3_DIRECT_DB_POOL_MAX: ${{ vars.V3_DIRECT_DB_POOL_MAX || '4' }}
+          V3_LITE_CHAPTER_WORKERS: ${{ vars.V3_LITE_CHAPTER_WORKERS || '2' }}
+          V3_ADAPTIVE_INITIAL_CONCURRENCY: ${{ vars.V3_ADAPTIVE_INITIAL_CONCURRENCY || '2' }}
+          V3_TESTED_CONCURRENCY_CEILING: ${{ vars.V3_TESTED_CONCURRENCY_CEILING || '8' }}
+          V3_WEBP_MAX_CONCURRENT: ${{ vars.V3_WEBP_MAX_CONCURRENT || '3' }}
+          V3_WEBP_MAX_CONCURRENT_HEAVY: ${{ vars.V3_WEBP_MAX_CONCURRENT_HEAVY || '1' }}
+          V3_UPLOAD_RATE_LIMIT_BYTES_PER_SEC: ${{ vars.V3_UPLOAD_RATE_LIMIT_BYTES_PER_SEC || '16777216' }}
+          V3_TELEGRAM_MEDIA_CONCURRENCY: ${{ vars.V3_TELEGRAM_MEDIA_CONCURRENCY || '10' }}
+          V3_DOWNLOAD_INFLIGHT_CONCURRENCY: ${{ vars.V3_DOWNLOAD_INFLIGHT_CONCURRENCY || '16' }}
+        run: |
+          umask 077
+          cat > .env.pg18.override <<EOF
+          IMPORTER_DB_MODE=direct
+          IMPORTER_RUNTIME_MODE=lite
+          YUGABYTE_HOST=51.222.37.67
+          YUGABYTE_PORT=443
+          YUGABYTE_USER=nox_importer
+          YUGABYTE_DATABASE=nox
+          YUGABYTE_PASSWORD=${PG18_NOX_IMPORTER_PASSWORD}
+          DB_MTLS_ENABLED=true
+          DB_MTLS_CA_CERT=${PG18_MTLS_CA_B64}
+          DB_MTLS_CLIENT_CERT=${PG18_MTLS_CERT_B64}
+          DB_MTLS_CLIENT_KEY=${PG18_MTLS_KEY_B64}
+          DB_MTLS_SERVERNAME=pg-importer.nox.internal
+          DIRECT_DB_POOL_MAX=${V3_DIRECT_DB_POOL_MAX}
+          LITE_CHAPTER_WORKERS=${V3_LITE_CHAPTER_WORKERS}
+          ADAPTIVE_INITIAL_CONCURRENCY=${V3_ADAPTIVE_INITIAL_CONCURRENCY}
+          TESTED_CONCURRENCY_CEILING=${V3_TESTED_CONCURRENCY_CEILING}
+          WEBP_MAX_CONCURRENT=${V3_WEBP_MAX_CONCURRENT}
+          WEBP_MAX_CONCURRENT_HEAVY=${V3_WEBP_MAX_CONCURRENT_HEAVY}
+          UPLOAD_RATE_LIMIT_BYTES_PER_SEC=${V3_UPLOAD_RATE_LIMIT_BYTES_PER_SEC}
+          TELEGRAM_MEDIA_CONCURRENCY=${V3_TELEGRAM_MEDIA_CONCURRENCY}
+          DOWNLOAD_INFLIGHT_CONCURRENCY=${V3_DOWNLOAD_INFLIGHT_CONCURRENCY}
+          EOF
+          echo "Generated .env.pg18.override cleanly"
+
       - name: Commit reviewed runtime artifact to DIScloud
         uses: discloud/deploy-action@fae7024653d941a19daa2b6f56d2ae208e008c54
         with:
@@ -71,13 +114,15 @@ jobs:
           app_id: ${{ steps.resolve_discloud_app.outputs.app_id }}
           team: ${{ steps.resolve_discloud_app.outputs.is_team }}
           # Do not upload .env, source, tests, git metadata, or local caches.
-          # Runtime configuration remains in DIScloud's protected environment.
+          # Runtime configuration remains in DIScloud's protected environment;
+          # .env.pg18.override swaps DB to OVH PG18 mTLS while keeping existing Telegram bot tokens from .env.
           glob: |
             build/**
             discloud.config
             package.json
             package-lock.json
             README.md
+            .env.pg18.override
 
       - name: Verify deployed runtime and site health
         env:

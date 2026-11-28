@@ -96,7 +96,7 @@ const sourceExecutionEligibilitySql = (alias: string): string => `(
     OR ${alias}.blocked_details->>'recovered_at' IS NOT NULL)
 )`;
 
-const priorityName = (value: number): LitePriority => (['STAFF', 'P0', 'P1', 'P2'] as LitePriority[])[value] || 'P2';
+const priorityName = (value: number): LitePriority => (['P0', 'STAFF', 'P1', 'P2'] as LitePriority[])[value] || 'P2';
 const asTask = (row: Row): LiteTask => ({
   id: row.id, taskType: row.task_type, workId: row.work_id, workKey: row.work_key,
   chapterKey: row.chapter_key, priority: priorityName(row.priority), basePriority: priorityName(row.base_priority),
@@ -1700,7 +1700,9 @@ export class LiteRepository {
         `SELECT 1 FROM importer_staff_requests
          WHERE work_id=$1::uuid AND status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE') LIMIT 1`, [input.workId],
       ) : { rowCount: 0 };
-      const priority = staff.rowCount ? 0 : LITE_PRIORITY_RANK[input.priority];
+      const priority = staff.rowCount
+        ? Math.min(LITE_PRIORITY_RANK.STAFF, LITE_PRIORITY_RANK[input.priority])
+        : LITE_PRIORITY_RANK[input.priority];
       const result = await client.query<Row>(
         `INSERT INTO importer_lite_tasks
           (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
@@ -1754,9 +1756,13 @@ export class LiteRepository {
         const values: unknown[] = [];
         const rows = batch.map((input, index) => {
           const start = index * 12;
+          const baseRank = LITE_PRIORITY_RANK[input.priority];
+          const effectiveRank = staffWorkIds.has(String(input.workId))
+            ? Math.min(LITE_PRIORITY_RANK.STAFF, baseRank)
+            : baseRank;
           values.push(
             input.taskType, input.workId || null, input.workKey, input.chapterKey || null,
-            staffWorkIds.has(String(input.workId)) ? 0 : LITE_PRIORITY_RANK[input.priority], LITE_PRIORITY_RANK[input.priority],
+            effectiveRank, baseRank,
             input.idempotencyKey, input.nextRunAt || new Date(), input.maxAttempts || 8,
             JSON.stringify(input.payload || {}), JSON.stringify(input.checkpoint || {}), Boolean(input.monitoring),
           );
@@ -1898,7 +1904,8 @@ export class LiteRepository {
     maxPerSource?: number;
     sourceTiers?: ReadonlyMap<string, 'FAST' | 'NORMAL' | 'SLOW'>;
   } = {}): Promise<P1FocusGroupSnapshot> {
-    const desiredSize = Math.max(12, Math.min(48, Math.floor(options.targetSize || 24)));
+    // V3.0 Contract E: standard cohort of 10 works (adaptable 5..9 under measured bottleneck).
+    const desiredSize = Math.max(5, Math.min(10, Math.floor(options.targetSize || 10)));
     const maxPerSource = Math.max(2, Math.min(16, Math.floor(options.maxPerSource || 6)));
     const sourceTiers = options.sourceTiers;
     const maxFastPerSource = Math.max(maxPerSource, Math.ceil(desiredSize * 0.55));
@@ -3835,7 +3842,7 @@ export class LiteRepository {
              CASE WHEN EXISTS (
                SELECT 1 FROM importer_staff_requests s
                WHERE s.work_id=$5::uuid AND s.status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')
-             ) THEN 0 ELSE $8::smallint END,
+             ) THEN LEAST($8::smallint, 1) ELSE $8::smallint END,
              $8::smallint,$9,$10::jsonb
            FROM completed
            ON CONFLICT(idempotency_key) DO NOTHING

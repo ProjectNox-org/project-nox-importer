@@ -228,9 +228,13 @@ export class GreenShitAdapter {
         }
     }
     async searchWorks(query) {
-        const url = `${this.apiUrl}/obras/pesquisa?q=${encodeURIComponent(query)}`;
+        const primaryUrl = `${this.apiUrl}/obras/buscar?q=${encodeURIComponent(query)}`;
+        const legacyUrl = `${this.apiUrl}/obras/pesquisa?q=${encodeURIComponent(query)}`;
         try {
-            const data = await this.fetchJson(url);
+            let data = await this.fetchJson(primaryUrl);
+            if (data == null) {
+                data = await this.fetchJson(legacyUrl);
+            }
             const obras = data?.obras || data?.data || [];
             return obras.map((item) => ({
                 sourceWorkId: String(item.obr_id),

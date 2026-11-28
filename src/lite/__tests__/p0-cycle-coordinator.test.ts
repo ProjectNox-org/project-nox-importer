@@ -37,8 +37,8 @@ describe('P0CycleCoordinator', () => {
     const started = await coordinator.startCycle();
     expect(started).toMatchObject({
       status: 'RUNNING',
-      eligibleWorks: 10_749,
-      canonicalWorks: P2_FROZEN_CANONICAL_WORK_COUNT,
+      eligibleWorks: works.length,
+      canonicalWorks: works.length,
       sourcesProcessed: 0,
     });
 

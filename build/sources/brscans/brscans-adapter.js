@@ -11,7 +11,7 @@ export class BRScansAdapter {
     id = 'brscans';
     name = 'BR Scans';
     baseUrl = 'https://brscans.vercel.app';
-    apiUrl = 'https://e5oer7ngt8.execute-api.sa-east-1.amazonaws.com/dev';
+    apiUrl = 'https://3wzrvo9ltl.execute-api.sa-east-1.amazonaws.com/dev';
     constructor(rateLimiter = new HostRateLimiter(2), transport = fetch) {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
@@ -24,7 +24,7 @@ export class BRScansAdapter {
         await this.rateLimiter.acquire(host);
         const response = await this.transport(url, {
             headers: { Accept: 'application/json', Referer: `${this.baseUrl}/` },
-            signal: AbortSignal.timeout(3_000),
+            signal: AbortSignal.timeout(12_000),
         });
         if (!response.ok)
             throw new Error(`BRScans HTTP ${response.status} for ${path}`);
