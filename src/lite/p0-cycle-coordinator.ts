@@ -630,12 +630,13 @@ export class P0CycleCoordinator {
     } else {
       this.persistence = new InMemoryP0CyclePersistence(this.matcher.canonicalWorks);
     }
-    this.eligibleWorkCount = options.eligibleWorkCount ?? P0_ELIGIBLE_WORK_COUNT;
-    this.canonicalWorkCount = options.canonicalWorkCount ?? P2_FROZEN_CANONICAL_WORK_COUNT;
+    this.eligibleWorkCount = options.eligibleWorkCount ?? this.matcher.canonicalWorks.length;
+    this.canonicalWorkCount = options.canonicalWorkCount ?? this.matcher.canonicalWorks.length;
     this.now = options.now ?? (() => new Date());
     this.p2AdmissionPolicy = options.p2AdmissionPolicy;
     this.onNewMappingDiscovered = options.onNewMappingDiscovered;
-    this.negativeCacheTtlMs = Math.max(0, options.negativeCacheTtlMs ?? 24 * 60 * 60 * 1000);
+    // V3.0 Contract B: do not reuse stale NOT_FOUND entries across cycles by default.
+    this.negativeCacheTtlMs = Math.max(0, options.negativeCacheTtlMs ?? 0);
   }
 
   /**

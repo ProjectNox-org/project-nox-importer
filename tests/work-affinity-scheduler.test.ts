@@ -249,16 +249,29 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(acquired?.priority).toBe(100);
   });
 
-  it('keeps an eligible STAFF job ahead of P0, P1, and P2', async () => {
+  it('keeps an eligible P0 job ahead of STAFF, and STAFF ahead of P1 and P2', async () => {
+    const p0Job = {
+      id: 'p0-preempt-staff', source: 'mangaflix', priority: 100, chapter_sort_key: 1,
+      payload: { workId: 'p0-work', chapterNumber: 1, isFreshRelease: true },
+    };
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue(['p0-work']);
+    vi.spyOn(scheduler as any, 'claimSingleJob').mockResolvedValue(p0Job);
+    vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockImplementation(async () => {
+      throw new Error('STAFF must not preempt an eligible P0 claim');
+    });
+
+    const p0Acquired = await scheduler.acquireNextChapterJob({
+      workerId: 'worker-p0-first', allowedSources: ['mangaflix'],
+    });
+    expect(p0Acquired?.id).toBe('p0-preempt-staff');
+
     const staffJob = {
       id: 'staff-job', source: 'mangaflix', priority: 1000, chapter_sort_key: 1,
       payload: { workId: 'staff-work', chapterNumber: 1, staffForced: true },
     };
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([]);
     vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(true);
     vi.spyOn(scheduler as any, 'claimStaffForcedJob').mockResolvedValue(staffJob);
-    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockImplementation(async () => {
-      throw new Error('P0 must not be probed before an eligible STAFF claim');
-    });
     vi.spyOn(scheduler as any, 'claimSingleJob').mockImplementation(async () => {
       throw new Error('P1/P2 must not be reached before an eligible STAFF claim');
     });

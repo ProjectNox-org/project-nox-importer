@@ -5,16 +5,16 @@ import { SOURCE_CONCURRENCY_LIMITS, getSourceConcurrencyLimit, getFairSourceConc
 
 describe('PROJECT NOX — FASE 2: REGRESSÃO OBRIGATÓRIA (TESTES A a G)', () => {
 
-  // Teste A — P0 permanente
-  it('TESTE A: P0 permanente — hierarquia e isolamento garantem que P0 não é interrompido por carga P1/P2', () => {
-    // 1. Strict priority hierarchy: Staff < P0 < P1 < P2
-    expect(LITE_PRIORITY_RANK.STAFF).toBeLessThan(LITE_PRIORITY_RANK.P0);
-    expect(LITE_PRIORITY_RANK.P0).toBeLessThan(LITE_PRIORITY_RANK.P1);
+  // Teste A — P0 permanente (V3.0: P0 > STAFF > P1 > P2)
+  it('TESTE A: P0 permanente — hierarquia e isolamento garantem P0 > STAFF > P1 > P2', () => {
+    // 1. Strict priority hierarchy: P0 < STAFF < P1 < P2
+    expect(LITE_PRIORITY_RANK.P0).toBeLessThan(LITE_PRIORITY_RANK.STAFF);
+    expect(LITE_PRIORITY_RANK.STAFF).toBeLessThan(LITE_PRIORITY_RANK.P1);
     expect(LITE_PRIORITY_RANK.P1).toBeLessThan(LITE_PRIORITY_RANK.P2);
 
-    // 2. Numerical values: 0 (STAFF), 1 (P0), 2 (P1), 3 (P2)
-    expect(LITE_PRIORITY_RANK.STAFF).toBe(0);
-    expect(LITE_PRIORITY_RANK.P0).toBe(1);
+    // 2. Numerical values: 0 (P0), 1 (STAFF), 2 (P1), 3 (P2)
+    expect(LITE_PRIORITY_RANK.P0).toBe(0);
+    expect(LITE_PRIORITY_RANK.STAFF).toBe(1);
     expect(LITE_PRIORITY_RANK.P1).toBe(2);
     expect(LITE_PRIORITY_RANK.P2).toBe(3);
   });

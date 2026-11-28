@@ -1615,16 +1615,18 @@ export class ImporterLiteRuntime {
     if (typeof (this.queue as any).refreshP1FocusGroup !== 'function') return;
     const now = Date.now();
     const hasWarmFocusGroup = typeof (this.queue as any).getP1FocusWorkKeys === 'function'
-      && this.queue.getP1FocusWorkKeys().length >= 12;
+      && this.queue.getP1FocusWorkKeys().length >= 8;
     const minFocusRefreshIntervalMs = hasWarmFocusGroup ? 60_000 : 45_000;
     if (!force && now - this.lastP1FocusRefreshAt < minFocusRefreshIntervalMs) return;
-    if (!force && (this.sourceMetadataPool.waitingCount || 0) > 1 && typeof (this.queue as any).getP1FocusWorkKeys === 'function' && this.queue.getP1FocusWorkKeys().length >= 8) {
+    if (!force && (this.sourceMetadataPool.waitingCount || 0) > 1 && typeof (this.queue as any).getP1FocusWorkKeys === 'function' && this.queue.getP1FocusWorkKeys().length >= 5) {
       return;
     }
     if (this.p1FocusRefreshInFlight) return this.p1FocusRefreshInFlight;
     this.lastP1FocusRefreshAt = now;
-    const effectiveCap = Math.max(12, this.executor.getEffectiveChapterAdmissionCap());
-    const targetSize = Math.max(8, Math.min(16, Math.round(effectiveCap * 0.8)));
+    // V3.0 Contract E: P1 cohort defaults to 10 works (adaptable 5..9 under measured bottleneck).
+    const measuredBottleneck = (this.sourceMetadataPool.waitingCount || 0) > 1
+      || this.hasSustainedSourceMetadataPoolPressure();
+    const targetSize = measuredBottleneck ? 7 : 10;
     const sourceTiers = this.sourcePerformance.getTierMap([
       ...this.executor.getFairSourceDemand(),
       'nexus', 'taimumangas', 'tankouhentai', 'pizzariascan', 'nocturnesummer',
@@ -2701,31 +2703,9 @@ export class ImporterLiteRuntime {
         }
       }
       if (this.p2SubordinationState.subordinated) {
-        // While P2 is subordinated to P1 backlog, new canonical works are never admitted (blocked by resolveWork).
-        // However, unmapped catalog tasks are safely checked at a throttled cadence (every 15s) to allow multi-source
-        // discovery for existing canonical works to complete without delay.
-        if (Date.now() - this.lastNewWorkCatalogTurnAt >= 15_000) {
-          this.lastNewWorkCatalogTurnAt = Date.now();
-          const task = await this.queue.claimNewWorkCatalog(workerId, CATALOG_TASK_LEASE_SECONDS);
-          if (task) {
-            await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
-            return;
-          }
-        }
-        // Throttled discovery: at most once every 5 minutes while subordinated to prevent queue congestion
-        if (
-          typeof (this.queue as any).claimDueDiscovery === 'function' &&
-          Date.now() - this.lastNewWorkDiscoveryAt >= 300_000
-        ) {
-          this.lastNewWorkDiscoveryAt = Date.now();
-          const discoveryTask = await (this.queue as any).claimDueDiscovery(
-            workerId,
-            this.config.QUEUE_LEASE_DURATION_SECONDS || CATALOG_TASK_LEASE_SECONDS
-          );
-          if (discoveryTask) {
-            await this.discover(discoveryTask, workerId);
-          }
-        }
+        // V3.0 Contract F & Regra 9: When P1 has any executable work (PAUSED_P1_BUSY),
+        // normal P2 discovery and new-work batch creation stay strictly paused.
+        // STAFF onboarding and P0 universal monitoring run on their separate lanes.
         return;
       }
       const task = await this.queue.claimNewWorkCatalog(workerId, CATALOG_TASK_LEASE_SECONDS);

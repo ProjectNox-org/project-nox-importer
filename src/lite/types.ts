@@ -3,11 +3,11 @@
  * the legacy queue vocabulary: detail belongs in checkpoints and reasons, not
  * in ever more states.
  */
-export const LITE_PRIORITIES = ['STAFF', 'P0', 'P1', 'P2'] as const;
+export const LITE_PRIORITIES = ['P0', 'STAFF', 'P1', 'P2'] as const;
 export type LitePriority = (typeof LITE_PRIORITIES)[number];
 export const LITE_PRIORITY_RANK: Record<LitePriority, number> = {
-  STAFF: 0,
-  P0: 1,
+  P0: 0,
+  STAFF: 1,
   P1: 2,
   P2: 3,
 };
