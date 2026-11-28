@@ -11,9 +11,32 @@
  * - Authenticated & auditable STAFF onboarding remains an isolated exception (priority STAFF < P0).
  */
 
-import { selectFocusedP1Cohort, type WorkDemandSignals } from './demand-scorer.js';
+import {
+  selectDiverseP1Cohort,
+  selectFocusedP1Cohort,
+  type WorkDemandSignals,
+} from './demand-scorer.js';
 
-export type P2GateState = 'PAUSED_P1_BUSY' | 'ELIGIBLE_P1_EMPTY' | 'ELIGIBLE_P1_ALL_BLOCKED';
+export type P2GateState =
+  | 'PAUSED_P1_BUSY'
+  | 'ELIGIBLE_P1_DEFICIT'
+  | 'ELIGIBLE_P1_EMPTY'
+  | 'ELIGIBLE_P1_ALL_BLOCKED';
+
+export interface P2ReplenishmentPlan {
+  targetSize: number;
+  activeCohortSize: number;
+  executableBacklogWorks: number;
+  deficit: number;
+  shouldRequestP2: boolean;
+  mode: 'NONE' | 'DEFICIT_REPLENISHMENT' | 'FULL_BATCH';
+}
+
+export interface P1CohortControllerOptions {
+  enableDeficitReplenishment?: boolean;
+  enableDiversity?: boolean;
+  randomFn?: () => number;
+}
 
 export interface P1CohortBottleneckMetrics {
   rssMiB?: number;
@@ -55,6 +78,15 @@ export class P1CohortAndP2GateController {
   private targetSize = 10;
   private p2GateState: P2GateState = 'ELIGIBLE_P1_EMPTY';
   private readonly staffAuditLog: Array<{ staffUserId: string; auditReason: string; workKey: string; at: string }> = [];
+  private readonly enableDeficitReplenishment: boolean;
+  private readonly enableDiversity: boolean;
+  private readonly randomFn?: () => number;
+
+  constructor(options: P1CohortControllerOptions = {}) {
+    this.enableDeficitReplenishment = Boolean(options.enableDeficitReplenishment);
+    this.enableDiversity = Boolean(options.enableDiversity);
+    this.randomFn = options.randomFn;
+  }
 
   seedWorks(initial: readonly P1WorkState[]): void {
     this.works.clear();
@@ -84,6 +116,44 @@ export class P1CohortAndP2GateController {
     return [...this.staffAuditLog];
   }
 
+  getP2ReplenishmentPlan(): P2ReplenishmentPlan {
+    let executableBacklogWorks = 0;
+    for (const w of this.works.values()) {
+      if (w.pendingChapters <= 0) continue;
+      if (w.externallyBlocked || (w.executableChapters <= 0 && w.runningChapters <= 0)) continue;
+      executableBacklogWorks++;
+    }
+    const deficit = Math.max(0, this.targetSize - executableBacklogWorks);
+    if (executableBacklogWorks === 0) {
+      return {
+        targetSize: this.targetSize,
+        activeCohortSize: this.cohortIds.length,
+        executableBacklogWorks: 0,
+        deficit: this.targetSize,
+        shouldRequestP2: true,
+        mode: 'FULL_BATCH',
+      };
+    }
+    if (deficit > 0) {
+      return {
+        targetSize: this.targetSize,
+        activeCohortSize: this.cohortIds.length,
+        executableBacklogWorks,
+        deficit,
+        shouldRequestP2: true,
+        mode: 'DEFICIT_REPLENISHMENT',
+      };
+    }
+    return {
+      targetSize: this.targetSize,
+      activeCohortSize: this.cohortIds.length,
+      executableBacklogWorks,
+      deficit: 0,
+      shouldRequestP2: false,
+      mode: 'NONE',
+    };
+  }
+
   reconcile(bottleneck?: P1CohortBottleneckMetrics): {
     cohortIds: string[];
     targetSize: number;
@@ -104,8 +174,8 @@ export class P1CohortAndP2GateController {
     });
 
     const retainedSet = new Set(retained);
-    const eligibleBacklog: WorkDemandSignals[] = [];
-    let hasAnyExecutableP1 = false;
+    const eligibleBacklog: P1WorkState[] = [];
+    let executableCount = 0;
     let hasPendingBlockedP1 = false;
 
     for (const w of this.works.values()) {
@@ -114,7 +184,7 @@ export class P1CohortAndP2GateController {
         hasPendingBlockedP1 = true;
         continue;
       }
-      hasAnyExecutableP1 = true;
+      executableCount++;
       eligibleBacklog.push({
         ...w,
         currentlyInCohort: retainedSet.has(w.workId),
@@ -124,18 +194,25 @@ export class P1CohortAndP2GateController {
     if (retained.length < this.targetSize) {
       const openSlots = this.targetSize - retained.length;
       const fillCandidates = eligibleBacklog.filter((c) => !retainedSet.has(c.workId));
-      const { selectedIds } = selectFocusedP1Cohort(fillCandidates, Math.max(5, openSlots));
+      const existingCohort = retained
+        .map((id) => this.works.get(id))
+        .filter((w): w is P1WorkState => Boolean(w));
+      const { selectedIds } = this.enableDiversity
+        ? selectDiverseP1Cohort(fillCandidates, openSlots, { existingCohort, randomFn: this.randomFn })
+        : selectFocusedP1Cohort(fillCandidates, Math.max(5, openSlots));
       const next = [...retained, ...selectedIds.slice(0, openSlots)];
       this.cohortIds = next.slice(0, this.targetSize);
     } else {
       this.cohortIds = retained.slice(0, this.targetSize);
     }
 
-    this.p2GateState = hasAnyExecutableP1
-      ? 'PAUSED_P1_BUSY'
-      : hasPendingBlockedP1
-        ? 'ELIGIBLE_P1_ALL_BLOCKED'
-        : 'ELIGIBLE_P1_EMPTY';
+    if (executableCount === 0) {
+      this.p2GateState = hasPendingBlockedP1 ? 'ELIGIBLE_P1_ALL_BLOCKED' : 'ELIGIBLE_P1_EMPTY';
+    } else if (this.enableDeficitReplenishment && executableCount < this.targetSize) {
+      this.p2GateState = 'ELIGIBLE_P1_DEFICIT';
+    } else {
+      this.p2GateState = 'PAUSED_P1_BUSY';
+    }
 
     return {
       cohortIds: [...this.cohortIds],
@@ -183,7 +260,12 @@ export class P1CohortAndP2GateController {
       };
     }
 
-    const capped = newWorks.slice(0, Math.min(10, maxBatchSize));
+    const plan = this.getP2ReplenishmentPlan();
+    const effectiveLimit = check.p2GateState === 'ELIGIBLE_P1_DEFICIT'
+      ? Math.min(10, maxBatchSize, plan.deficit)
+      : Math.min(10, maxBatchSize);
+
+    const capped = newWorks.slice(0, Math.max(0, effectiveLimit));
     if (capped.length === 0) {
       return {
         admitted: false,
@@ -195,16 +277,58 @@ export class P1CohortAndP2GateController {
 
     const enrolledWorkIds: string[] = [];
     for (const nw of capped) {
+      if (!this.works.has(nw.workId)) {
+        this.works.set(nw.workId, { ...nw });
+        enrolledWorkIds.push(nw.workId);
+      }
+    }
+
+    const afterState = this.reconcile().p2GateState;
+    return {
+      admitted: enrolledWorkIds.length > 0,
+      gateState: afterState,
+      enrolledWorkIds,
+      reason: `ADMITTED_P2_BATCH(${enrolledWorkIds.length}) -> P0+P1 enrolled -> ${afterState}`,
+    };
+  }
+
+  /**
+   * Explicit P1->P2 deficit replenishment: requests only the missing slots needed to fill the target
+   * cohort (e.g., 3 executable works for a 10-work cohort requests 7 from P2) without pausing/interrupting
+   * the 3 works already in progress, preventing circular loops via idempotent membership check.
+   */
+  tryAdmitDeficitP2Batch(
+    newWorks: readonly P1WorkState[],
+    maxBatchSize = 10,
+  ): { admitted: boolean; requestedDeficit: number; gateState: P2GateState; enrolledWorkIds: string[]; reason: string } {
+    this.reconcile();
+    const plan = this.getP2ReplenishmentPlan();
+    if (!plan.shouldRequestP2 || plan.deficit <= 0) {
+      return {
+        admitted: false,
+        requestedDeficit: 0,
+        gateState: this.p2GateState,
+        enrolledWorkIds: [],
+        reason: 'NO_P1_DEFICIT: cohort at full executable capacity',
+      };
+    }
+
+    const limit = Math.min(10, Math.max(0, maxBatchSize), plan.deficit);
+    const enrolledWorkIds: string[] = [];
+    for (const nw of newWorks) {
+      if (enrolledWorkIds.length >= limit) break;
+      if (this.works.has(nw.workId)) continue;
       this.works.set(nw.workId, { ...nw });
       enrolledWorkIds.push(nw.workId);
     }
 
     const afterState = this.reconcile().p2GateState;
     return {
-      admitted: true,
+      admitted: enrolledWorkIds.length > 0,
+      requestedDeficit: plan.deficit,
       gateState: afterState,
       enrolledWorkIds,
-      reason: `ADMITTED_P2_BATCH(${enrolledWorkIds.length}) -> P0+P1 enrolled -> ${afterState}`,
+      reason: `DEFICIT_REPLENISHMENT(deficit=${plan.deficit}, enrolled=${enrolledWorkIds.length}) -> ${afterState}`,
     };
   }
 

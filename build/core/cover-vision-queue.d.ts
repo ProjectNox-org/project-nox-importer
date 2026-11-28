@@ -23,6 +23,8 @@ export declare class CoverVisionQueue {
     private readonly pool;
     private logger;
     private schemaReady;
+    private schemaUnavailable;
+    private schemaUnavailableLogged;
     constructor(pool: pg.Pool);
     ensureSchema(): Promise<void>;
     enqueueTask(workId: string, candidateCovers: CoverCandidate[], maxAttempts?: number): Promise<void>;

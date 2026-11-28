@@ -20,6 +20,11 @@ export interface WorkDemandSignals {
     hasP0NewReleaseBlocked: boolean;
     hoursWaitingInQueue: number;
     currentlyInCohort?: boolean;
+    genres?: readonly string[];
+    kind?: string | null;
+    contentRating?: string | null;
+    primarySource?: string | null;
+    availableSources?: readonly string[];
 }
 export interface DemandScoreResult {
     workId: string;
@@ -37,6 +42,18 @@ export interface DemandScoreResult {
 }
 export declare function scoreWorkDemand(signals: WorkDemandSignals): DemandScoreResult;
 export declare function selectFocusedP1Cohort(candidates: readonly WorkDemandSignals[], targetCohortSize?: number): {
+    selectedIds: string[];
+    ranked: DemandScoreResult[];
+};
+export type PopularityTier = 'HIGH' | 'MID' | 'TAIL';
+export type MissingBucket = 'NEAR_DONE' | 'MEDIUM' | 'LARGE';
+export declare function classifyPopularityTier(views7d: number, views30d: number): PopularityTier;
+export declare function classifyMissingBucket(remaining: number): MissingBucket;
+export declare function selectDiverseP1Cohort(candidates: readonly WorkDemandSignals[], openSlots: number, options?: {
+    existingCohort?: readonly WorkDemandSignals[];
+    randomFn?: () => number;
+    jitterPoints?: number;
+}): {
     selectedIds: string[];
     ranked: DemandScoreResult[];
 };
