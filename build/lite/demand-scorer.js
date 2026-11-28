@@ -8,6 +8,7 @@
  * - Anti-starvation aging for older tail works
  * - Hysteresis (+10%) to avoid churning focused cohort works unnecessarily
  */
+import { normalizeDynamicTaxonomyTags, } from './dynamic-diversity-history.js';
 export function scoreWorkDemand(signals) {
     const safe24 = Math.max(0, signals.views24h || 0);
     const safe7d = Math.max(0, signals.views7d || 0);
@@ -83,6 +84,7 @@ export function selectDiverseP1Cohort(candidates, openSlots, options = {}) {
     const targetPick = Math.max(0, Math.floor(openSlots));
     const randomFn = options.randomFn ?? Math.random;
     const jitterPoints = Math.max(0, options.jitterPoints ?? 12);
+    const histProfile = options.history ? options.history.getDecayedProfile() : null;
     const genreCounts = new Map();
     const kindCounts = new Map();
     const ratingCounts = new Map();
@@ -91,10 +93,8 @@ export function selectDiverseP1Cohort(candidates, openSlots, options = {}) {
     const missingCounts = new Map();
     const bump = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
     const recordWork = (w) => {
-        for (const g of w.genres || []) {
-            const ng = normVal(g, '');
-            if (ng)
-                bump(genreCounts, ng);
+        for (const g of normalizeDynamicTaxonomyTags(w.genres)) {
+            bump(genreCounts, g);
         }
         if (w.kind)
             bump(kindCounts, normVal(w.kind));
@@ -111,8 +111,10 @@ export function selectDiverseP1Cohort(candidates, openSlots, options = {}) {
         recordWork(w);
     }
     const baseScores = new Map();
+    const cleanGenresById = new Map();
     for (const c of candidates) {
         baseScores.set(c.workId, scoreWorkDemand(c));
+        cleanGenresById.set(c.workId, normalizeDynamicTaxonomyTags(c.genres));
     }
     const pool = [...candidates];
     const jitterById = new Map();
@@ -128,14 +130,17 @@ export function selectDiverseP1Cohort(candidates, openSlots, options = {}) {
             const c = pool[i];
             const base = baseScores.get(c.workId).score;
             let divBonus = 0;
-            const genres = (c.genres || []).map((g) => normVal(g, '')).filter(Boolean);
+            const genres = cleanGenresById.get(c.workId) || [];
             if (genres.length > 0) {
                 let unseenGenres = 0;
                 for (const g of genres) {
                     if ((genreCounts.get(g) ?? 0) === 0)
                         unseenGenres++;
                 }
-                divBonus += unseenGenres > 0 ? Math.min(28, 18 + (unseenGenres - 1) * 5) : 0;
+                // Evaluates ALL normalized tags (beyond tag #5) with sublinear scaling
+                if (unseenGenres > 0) {
+                    divBonus += Math.min(34, 16 + (unseenGenres / Math.sqrt(genres.length)) * 8);
+                }
             }
             if (c.kind) {
                 const kCount = kindCounts.get(normVal(c.kind)) ?? 0;
@@ -155,7 +160,17 @@ export function selectDiverseP1Cohort(candidates, openSlots, options = {}) {
             const remaining = Math.max(1, (c.totalManifestChapters || 0) - (c.publishedChapters || 0));
             const missBucket = classifyMissingBucket(remaining);
             divBonus += (missingCounts.get(missBucket) ?? 0) === 0 ? 10 : 0;
-            const total = base + divBonus + (jitterById.get(c.workId) ?? 0);
+            const crossCohortDelta = options.history && histProfile
+                ? options.history.computeCrossCohortAdjustment({
+                    genres,
+                    preNormalized: true,
+                    source: src ?? null,
+                    kind: c.kind ?? null,
+                    contentRating: c.contentRating ?? null,
+                    popularityTier: popTier,
+                }, { genreCounts, sourceCounts, kindCounts, ratingCounts, popularityCounts }, histProfile).totalBonus
+                : 0;
+            const total = base + divBonus + crossCohortDelta + (jitterById.get(c.workId) ?? 0);
             if (total > bestScore) {
                 bestScore = total;
                 bestIdx = i;

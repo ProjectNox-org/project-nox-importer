@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import { type LitePriority, type LiteTask, type LiteTaskState, type LiteTaskType } from './types.js';
+import { DiversitySelectionHistory } from './dynamic-diversity-history.js';
 type Db = Pick<Pool, 'query' | 'connect'>;
 /**
  * Older catalog passes could put two legacy mappings for one canonical chapter
@@ -107,6 +108,8 @@ export interface P1FocusGroupSnapshot {
     focusGenres?: Record<string, number>;
     focusPopularityTiers?: Record<string, number>;
     deficitSlots?: number;
+    recentHistoryEntries?: number;
+    distinctHistoricalGenres?: number;
     primaryClaims: number;
     secondaryClaims: number;
     completedWorksSinceBoot: number;
@@ -132,6 +135,9 @@ export declare class LiteRepository {
     private p1CompletedWorkIds;
     private p1PrimaryClaims;
     private p1SecondaryClaims;
+    private p1DiversityHistory;
+    private p1DiversityHistoryLoaded;
+    private p1DiversityHistoryPersistedVersion;
     private lastHistoricalP1CatalogSource;
     private p1BacklogCache;
     private p0MonitorCursorEnsured;
@@ -294,6 +300,8 @@ export declare class LiteRepository {
         maxPerSource?: number;
         sourceTiers?: ReadonlyMap<string, 'FAST' | 'NORMAL' | 'SLOW'>;
     }): Promise<P1FocusGroupSnapshot>;
+    getDiversityHistory(): DiversitySelectionHistory;
+    getDiversityHistorySnapshot(): import("./dynamic-diversity-history.js").DiversityHistorySnapshot;
     getP1FocusWorkKeys(): string[];
     getP1FocusGroupSnapshot(): P1FocusGroupSnapshot;
     /**

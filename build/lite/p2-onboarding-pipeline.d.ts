@@ -9,6 +9,7 @@
 import { type StoredMediaResult } from '../storage/media.js';
 import type { StorageProvider } from '../storage/provider.js';
 import { P2MetadataConsolidator, type ExistingCatalogWork, type P2AliasSourceEvidence, type P2MainSourceEvidence, type P2WorkQualityReport } from './p2-metadata-consolidator.js';
+import { DiversitySelectionHistory } from './dynamic-diversity-history.js';
 import type { P1CohortAndP2GateController, StaffOnboardingAuth } from './p1-cohort-manager.js';
 import type { P0UniversalScanner } from './p0-universal-scanner.js';
 export type P2CheckpointStatus = 'DISCOVERING' | 'CONSOLIDATING' | 'QUALITY_GATE' | 'PENDING_IDENTITY_REVIEW' | 'PENDING_METADATA_RETRY' | 'COMMITTED' | 'MERGED_EXISTING' | 'FAILED';
@@ -160,6 +161,7 @@ export declare function selectDiverseP2Candidates(candidates: readonly P2BatchCa
         kinds?: Record<string, number>;
         contentRatings?: Record<string, number>;
     };
+    history?: DiversitySelectionHistory;
     randomFn?: () => number;
 }): P2BatchCandidateInput[];
 export interface P2BatchExecutionResult {
@@ -184,6 +186,7 @@ export declare class P2OnboardingPipeline {
         simulateCrashAfterStage?: 'BEFORE_COMMIT';
         allowDeficitReplenishment?: boolean;
         diversifySelection?: boolean;
+        diversityHistory?: DiversitySelectionHistory;
         randomFn?: () => number;
         maxBatchSize?: number;
     }): Promise<P2BatchExecutionResult>;

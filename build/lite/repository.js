@@ -3,6 +3,7 @@ import { performance } from 'node:perf_hooks';
 import { SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
 import { LITE_PRIORITY_RANK } from './types.js';
 import { parseCanonicalChapterKey } from './chapter-identity.js';
+import { DIVERSITY_HISTORY_SETTINGS_KEY, DiversitySelectionHistory, normalizeDynamicTaxonomyTags, } from './dynamic-diversity-history.js';
 import { STORED_MAPPING_ALIAS_FIELDS, STORED_MAPPING_TAG_FIELDS } from './mapping-metadata.js';
 /**
  * Older catalog passes could put two legacy mappings for one canonical chapter
@@ -126,6 +127,9 @@ export class LiteRepository {
     p1CompletedWorkIds = [];
     p1PrimaryClaims = 0;
     p1SecondaryClaims = 0;
+    p1DiversityHistory = new DiversitySelectionHistory();
+    p1DiversityHistoryLoaded = false;
+    p1DiversityHistoryPersistedVersion = 0;
     lastHistoricalP1CatalogSource = '';
     p1BacklogCache = null;
     p0MonitorCursorEnsured = false;
@@ -1743,6 +1747,20 @@ export class LiteRepository {
         };
         this.p1FocusTargetSize = desiredSize;
         const metaDb = this.sourceMetadataDb || this.db;
+        if (!this.p1DiversityHistoryLoaded) {
+            this.p1DiversityHistoryLoaded = true;
+            try {
+                const histRes = await metaDb.query(`SELECT value FROM settings WHERE key = $1 LIMIT 1`, [DIVERSITY_HISTORY_SETTINGS_KEY]);
+                const rawHist = histRes?.rows?.[0]?.value;
+                if (typeof rawHist === 'string' && rawHist.trim()) {
+                    this.p1DiversityHistory = DiversitySelectionHistory.deserialize(rawHist);
+                }
+            }
+            catch {
+                // Non-fatal on isolated mock DBs or transient read glitches
+            }
+        }
+        const prevFocusKeySet = new Set(this.p1FocusWorkKeys);
         const horizonIso = new Date(Date.now() + 35_000).toISOString();
         const currentFocusKeys = this.p1FocusWorkKeys || [];
         const candidatesRes = await metaDb.query(`
@@ -1813,6 +1831,14 @@ export class LiteRepository {
          AND COALESCE(cs.has_chapter, true) = true
         LEFT JOIN active_sources s ON s.source = cs.source
         GROUP BY ws.work_key
+      ), work_tag_stats AS MATERIALIZED (
+        SELECT
+          ws.work_id,
+          array_agg(DISTINCT tg.slug ORDER BY tg.slug) FILTER (WHERE tg.slug IS NOT NULL) AS genres
+        FROM work_stats ws
+        JOIN work_tags wt ON wt.work_id = ws.work_id
+        JOIN tags tg ON tg.id = wt.tag_id
+        GROUP BY ws.work_id
       )
       SELECT
         ws.work_key,
@@ -1825,21 +1851,11 @@ export class LiteRepository {
         COALESCE(w.kind, 'MANHWA') AS work_kind,
         COALESCE(w.content_rating, 'GENERAL') AS content_rating,
         COALESCE(w.views_total, 0) AS views_total,
-        COALESCE(wt_agg.genres, '{}'::text[]) AS genres
+        COALESCE(wts.genres, '{}'::text[]) AS genres
       FROM work_stats ws
       LEFT JOIN route_stats rs ON rs.work_key = ws.work_key
       LEFT JOIN works w ON w.id = ws.work_id
-      LEFT JOIN LATERAL (
-        SELECT array_agg(tg.slug ORDER BY tg.slug) AS genres
-        FROM (
-          SELECT tg.slug
-          FROM work_tags wt
-          JOIN tags tg ON tg.id = wt.tag_id
-          WHERE wt.work_id = ws.work_id
-          ORDER BY tg.slug
-          LIMIT 5
-        ) tg
-      ) wt_agg ON true
+      LEFT JOIN work_tag_stats wts ON wts.work_id = ws.work_id
       WHERE ws.remaining_chapters > 0
     `, [horizonIso, currentFocusKeys]);
         const now = Date.now();
@@ -1886,9 +1902,7 @@ export class LiteRepository {
             const workKind = String(row.work_kind || 'MANHWA').toUpperCase();
             const contentRating = String(row.content_rating || 'GENERAL').toUpperCase();
             const viewsTotal = Number(row.views_total || 0);
-            const genres = Array.isArray(row.genres)
-                ? row.genres.map((g) => String(g || '').trim()).filter(Boolean)
-                : [];
+            const genres = normalizeDynamicTaxonomyTags(Array.isArray(row.genres) ? row.genres : []);
             candidateByKey.set(String(row.work_key), {
                 workKey: String(row.work_key),
                 workId: String(row.work_id),
@@ -1935,6 +1949,7 @@ export class LiteRepository {
         const ratingCounts = new Map();
         const genreCounts = new Map();
         const popularityCounts = new Map();
+        const histProfile = this.p1DiversityHistory.getDecayedProfile();
         let totalSlowCount = 0;
         const recordSelectedTaxonomy = (cand) => {
             sourceCounts.set(cand.source, (sourceCounts.get(cand.source) || 0) + 1);
@@ -1971,7 +1986,8 @@ export class LiteRepository {
                 popularityTier: cand.popularityTier,
             });
         }
-        // 2. Fill open Focus slots favoring multi-source, genre, kind, content-rating & popularity diversity + randomness.
+        // 2. Fill open Focus slots favoring multi-source, ALL-tag dynamic genre, kind, content-rating,
+        //    popularity diversity + cross-cohort history de-concentration + randomness.
         const remainingCandidates = [...candidateByKey.values()].filter((c) => !selectedSet.has(c.workKey));
         while (nextFocus.length < desiredSize && remainingCandidates.length > 0) {
             let bestIdx = -1;
@@ -1988,14 +2004,25 @@ export class LiteRepository {
                 const kindDiversityBonus = (kindCounts.get(cand.kind) || 0) === 0 ? 20 : (kindCounts.get(cand.kind) || 0) === 1 ? 6 : 0;
                 const ratingDiversityBonus = (ratingCounts.get(cand.contentRating) || 0) === 0 ? 18 : 0;
                 const unseenGenreCount = cand.genres.filter((g) => (genreCounts.get(g) || 0) === 0).length;
-                const genreDiversityBonus = unseenGenreCount > 0 ? Math.min(26, 16 + (unseenGenreCount - 1) * 4) : 0;
+                const genreDiversityBonus = unseenGenreCount > 0 && cand.genres.length > 0
+                    ? Math.min(34, 16 + (unseenGenreCount / Math.sqrt(cand.genres.length)) * 8)
+                    : 0;
                 const popDiversityBonus = (popularityCounts.get(cand.popularityTier) || 0) === 0 ? 12 : 0;
+                const crossCohortDelta = this.p1DiversityHistory.computeCrossCohortAdjustment({
+                    genres: cand.genres,
+                    preNormalized: true,
+                    source: cand.source,
+                    kind: cand.kind,
+                    contentRating: cand.contentRating,
+                    popularityTier: cand.popularityTier,
+                }, { genreCounts, sourceCounts, kindCounts, ratingCounts, popularityCounts }, histProfile).totalBonus;
                 const effectiveScore = cand.score +
                     srcDiversityBonus +
                     kindDiversityBonus +
                     ratingDiversityBonus +
                     genreDiversityBonus +
                     popDiversityBonus +
+                    crossCohortDelta +
                     cand.jitter;
                 if (effectiveScore > bestScore) {
                     bestScore = effectiveScore;
@@ -2035,7 +2062,15 @@ export class LiteRepository {
                         continue;
                     const count = sourceCounts.get(cand.source) || 0;
                     const genreBonus = cand.genres.some((g) => (genreCounts.get(g) || 0) === 0) ? 8 : 0;
-                    const effectiveScore = cand.score + genreBonus + cand.jitter - count * 4;
+                    const crossCohortHint = this.p1DiversityHistory.computeCrossCohortAdjustment({
+                        genres: cand.genres,
+                        preNormalized: true,
+                        source: cand.source,
+                        kind: cand.kind,
+                        contentRating: cand.contentRating,
+                        popularityTier: cand.popularityTier,
+                    }, { genreCounts, sourceCounts, kindCounts, ratingCounts, popularityCounts }, histProfile).totalBonus * 0.5;
+                    const effectiveScore = cand.score + genreBonus + crossCohortHint + cand.jitter - count * 4;
                     if (effectiveScore > bestEffectiveScore
                         || (effectiveScore === bestEffectiveScore && bestIdx >= 0 && cand.oldestTaskMs < remainingCandidates[bestIdx].oldestTaskMs)) {
                         bestEffectiveScore = effectiveScore;
@@ -2085,12 +2120,41 @@ export class LiteRepository {
                 }
             }
         }
+        // Record only newly admitted works in cross-cohort diversity history (never duplicate retained sticky works).
+        for (const entry of nextFocus) {
+            if (prevFocusKeySet.has(entry.workKey))
+                continue;
+            this.p1DiversityHistory.recordSelection({
+                workId: entry.workId,
+                selectedAtMs: now,
+                source: entry.source,
+                kind: entry.kind ?? null,
+                contentRating: entry.contentRating ?? null,
+                popularityTier: entry.popularityTier ?? null,
+                genres: entry.genres ?? [],
+            });
+        }
+        if (this.p1DiversityHistory.getVersion() !== this.p1DiversityHistoryPersistedVersion) {
+            this.p1DiversityHistoryPersistedVersion = this.p1DiversityHistory.getVersion();
+            try {
+                await metaDb.query(`INSERT INTO settings(key, value) VALUES($1, $2) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, [DIVERSITY_HISTORY_SETTINGS_KEY, this.p1DiversityHistory.serialize()]);
+            }
+            catch {
+                // Non-fatal persistence guard
+            }
+        }
         // Prioritize works with fewest remaining chapters at the front of the focus group
         nextFocus.sort((a, b) => a.remainingChapters - b.remainingChapters);
         this.p1FocusWorkKeys = nextFocus.map((item) => item.workKey);
         this.p1FocusMeta = new Map(nextFocus.map((item) => [item.workKey, item]));
         this.p1FocusRefreshedAt = new Date(now).toISOString();
         return this.getP1FocusGroupSnapshot();
+    }
+    getDiversityHistory() {
+        return this.p1DiversityHistory;
+    }
+    getDiversityHistorySnapshot() {
+        return this.p1DiversityHistory.getSnapshot();
     }
     getP1FocusWorkKeys() {
         return this.p1FocusWorkKeys;
@@ -2113,6 +2177,7 @@ export class LiteRepository {
                 focusGenres[g] = (focusGenres[g] || 0) + 1;
             }
         }
+        const histSnap = this.p1DiversityHistory.getSnapshot();
         return {
             targetSize: this.p1FocusTargetSize,
             focusWorkCount: this.p1FocusWorkKeys.length,
@@ -2123,6 +2188,8 @@ export class LiteRepository {
             focusGenres,
             focusPopularityTiers,
             deficitSlots: Math.max(0, this.p1FocusTargetSize - this.p1FocusWorkKeys.length),
+            recentHistoryEntries: histSnap.entryCount,
+            distinctHistoricalGenres: histSnap.distinctHistoricalGenres,
             primaryClaims: this.p1PrimaryClaims,
             secondaryClaims: this.p1SecondaryClaims,
             completedWorksSinceBoot: this.p1CompletedWorksCount,
