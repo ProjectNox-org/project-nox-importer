@@ -85,7 +85,11 @@ async function main() {
   let supabase: any;
   if (config.IMPORTER_DB_MODE === 'direct') {
     rootLogger.info('IMPORTER DATABASE MODE: DIRECT');
-    rootLogger.info('DB PATH: DIRECT YSQL TLS -> YugabyteDB Aeon');
+    rootLogger.info(
+      config.DB_MTLS_ENABLED
+        ? `DB PATH: DIRECT PG18 mTLS -> ${config.YUGABYTE_HOST}:${config.YUGABYTE_PORT}/${config.YUGABYTE_DATABASE}`
+        : 'DB PATH: DIRECT YSQL TLS -> YugabyteDB Aeon',
+    );
     supabase = new DirectSupabaseClient();
   } else {
     rootLogger.info('IMPORTER DATABASE MODE: GATEWAY');

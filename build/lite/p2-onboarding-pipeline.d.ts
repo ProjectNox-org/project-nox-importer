@@ -49,11 +49,17 @@ export interface P2OnboardingPersistence {
     }>;
     enrichExistingWorkSafe(input: {
         workId: string;
+        incomingTitle?: string | null;
+        incomingTitleLanguage?: 'pt-BR' | 'intl' | null;
+        incomingTitleTier?: 1 | 2 | 3 | 4 | null;
         incomingAliases: string[];
         incomingSynopsis: string | null;
         incomingSynopsisScore: number;
         incomingCoverMediaId: string | null;
         incomingCoverScore: number;
+        incomingCoverHasPtBrTitle?: boolean;
+        incomingCoverTier?: 1 | 2 | 3 | 4;
+        incomingCoverVerificationMethod?: string;
         incomingMappings: Array<{
             source: string;
             sourceWorkId: string;
@@ -108,11 +114,17 @@ export declare class InMemoryP2OnboardingPersistence implements P2OnboardingPers
     }>;
     enrichExistingWorkSafe(input: {
         workId: string;
+        incomingTitle?: string | null;
+        incomingTitleLanguage?: 'pt-BR' | 'intl' | null;
+        incomingTitleTier?: 1 | 2 | 3 | 4 | null;
         incomingAliases: string[];
         incomingSynopsis: string | null;
         incomingSynopsisScore: number;
         incomingCoverMediaId: string | null;
         incomingCoverScore: number;
+        incomingCoverHasPtBrTitle?: boolean;
+        incomingCoverTier?: 1 | 2 | 3 | 4;
+        incomingCoverVerificationMethod?: string;
         incomingMappings: Array<{
             source: string;
             sourceWorkId: string;

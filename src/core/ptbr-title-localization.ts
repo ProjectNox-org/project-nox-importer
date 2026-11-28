@@ -314,6 +314,63 @@ export function isConsecratedProperTitle(rawTitle: string): boolean {
   return CONSECRATED_PROPER_TITLES.has(key);
 }
 
+const PROTECTED_EDITORIAL_PROVENANCE_SOURCES = new Set([
+  'manual',
+  'admin',
+  'editorial',
+  'catalog_metadata_recovery',
+  'nox-catalog-metadata-recovery',
+]);
+
+/**
+ * Protects manual/admin/editorial locks and Third-AI historical recovery fields
+ * against unverified overwrites during automated P0/P1/P2 synchronization.
+ */
+export function isProtectedEditorialProvenance(fieldProv: Record<string, any> | null | undefined): boolean {
+  if (!fieldProv || typeof fieldProv !== 'object') return false;
+  const source = typeof fieldProv.source === 'string' ? fieldProv.source.toLowerCase().trim() : '';
+  const owner = typeof fieldProv.owner === 'string' ? fieldProv.owner.toLowerCase().trim() : '';
+  return (
+    PROTECTED_EDITORIAL_PROVENANCE_SOURCES.has(source) ||
+    PROTECTED_EDITORIAL_PROVENANCE_SOURCES.has(owner) ||
+    fieldProv.manual === true ||
+    fieldProv.locked === true
+  );
+}
+
+export type TitlePriorityTier = 1 | 2 | 3 | 4;
+
+/**
+ * 4-tier title preference for Brazilian catalog presentation:
+ * 1: Official/proven PT-BR title
+ * 2: Reliable secondary Portuguese title
+ * 3: International / English / consecrated Latin title
+ * 4: Original Japanese/Korean/Chinese/Romaji/other script title
+ */
+export function classifyTitlePriorityTier(
+  rawTitle: string,
+  isExplicitPt = false,
+): { tier: TitlePriorityTier; isPtBr: boolean; isPtOther: boolean; isConsecrated: boolean } {
+  const cleaned = cleanPtBrCandidateTitle(rawTitle) || cleanAlternativeTitle(rawTitle) || rawTitle.trim();
+  const key = alternativeTitleKey(cleaned);
+  const rejectedPtPt = Boolean(key && PT_PT_REJECTED_ALIASES.has(key));
+  const consecrated = isConsecratedProperTitle(cleaned);
+
+  if (!rejectedPtPt && (isExplicitPt || isPtBrTitle(cleaned))) {
+    return { tier: 1, isPtBr: true, isPtOther: false, isConsecrated: consecrated };
+  }
+  if (!rejectedPtPt && isPortugueseAlias(cleaned)) {
+    return { tier: 2, isPtBr: false, isPtOther: true, isConsecrated: consecrated };
+  }
+  const hasCjk = CJK_REGEX.test(cleaned);
+  const hasNonPtLatin = NON_PT_LATIN_DIACRITICS_REGEX.test(cleaned);
+  const hasStrongRomaji = STRONG_ROMAJI_MARKERS.test(cleaned);
+  if (!hasCjk && !hasNonPtLatin && !hasStrongRomaji && isPersistableAliasScript(cleaned)) {
+    return { tier: 3, isPtBr: false, isPtOther: false, isConsecrated: consecrated };
+  }
+  return { tier: 4, isPtBr: false, isPtOther: false, isConsecrated: consecrated };
+}
+
 export interface AutomaticPtBrTitlePromotionInput {
   workId?: string;
   slug?: string;

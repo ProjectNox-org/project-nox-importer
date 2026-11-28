@@ -30,6 +30,15 @@ export interface CandidateWork {
     contentRating?: 'GENERAL' | 'ADULT_18';
     coverId?: string | null;
     /**
+     * Optional verified PT-BR cover metadata supplied by P2/vision inspection so
+     * P0/metadata sync preserves verified PT-BR covers and only upgrades foreign covers
+     * when backed by real verification.
+     */
+    coverHasVerifiedPtBrTitle?: boolean;
+    coverTier?: 1 | 2 | 3 | 4;
+    coverVisualScore?: number;
+    coverVerificationMethod?: string;
+    /**
      * Cover registration can cost a source request and a storage upload. It is
      * intentionally lazy so an ambiguous work or healthy canonical cover does
      * not pay for media that will be discarded.

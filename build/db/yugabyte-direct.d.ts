@@ -7,8 +7,9 @@ import type { GatewayJob, PublishBatchParams } from '../core/gateway-client.js';
 export declare function getSqlFingerprint(queryArg: unknown): string;
 export declare function resolvePemInput(raw?: string): string | undefined;
 /**
- * Unified metadata pool with the primary Yugabyte pool to enforce a strict hard cap of
- * at most 2 server connections on YugabyteDB Aeon (preventing Connection Manager 60% saturation).
+ * Isolates background metadata / P0 discovery queries on OVH PG 18.7 mTLS (2 dedicated
+ * connections) so chapter workers never queue behind background probes, while keeping
+ * YugabyteDB Aeon unified at <=2 server connections when mTLS PG18 is inactive.
  */
 export declare function createYugabyteMetadataPool(): pg.Pool;
 export declare function getYugabytePool(): pg.Pool;

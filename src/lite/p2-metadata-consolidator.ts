@@ -10,6 +10,7 @@
  * and respects Third AI historical recovery coordination & manual provenance locks.
  */
 
+import crypto from 'node:crypto';
 import { ALIAS_ONLY_SOURCE_IDS, type AliasSourceCandidate } from '../alias-sources/types.js';
 import { cleanAlternativeTitle, alternativeTitleKey } from '../core/alternative-titles.js';
 import { inspectCoverForPtBrTitle, type CoverInspectionResult } from '../core/cover-vision-inspector.js';
@@ -19,14 +20,115 @@ import {
   normalizeTitle,
 } from '../core/matching.js';
 import {
-  isConsecratedProperTitle,
+  classifyTitlePriorityTier,
   isPortugueseWord,
-  isPtBrTitle,
+  PT_PT_REJECTED_ALIASES,
+  type TitlePriorityTier,
 } from '../core/ptbr-title-localization.js';
 import { isPersistableAliasScript, isPortugueseAlias } from '../alias-sources/identity-verifier.js';
 import { inspectImage, type ImageInfo } from '../storage/media.js';
 
 export const P2_MAX_SYNTHETIC_BYPASS_SOURCES = new Set<string>(ALIAS_ONLY_SOURCE_IDS);
+
+/**
+ * Audited Brazilian PT-BR sources whose visually adequate covers are eligible
+ * for Tier 2 (legitimate BR source cover) when no OCR/verified PT-BR cover is available.
+ */
+export const BRAZILIAN_TRUSTED_SOURCES = new Set<string>([
+  'nexus',
+  'manhastro',
+  'mangaflix',
+  'pizzariascan',
+  'taimumangas',
+  'nocturnesummer',
+  'tankouhentai',
+  'imperiodabritannia',
+  'brscans',
+  'hipercool',
+  'mangotoons',
+  'hanamiheaven',
+  'littletyrant',
+  'maidscan',
+  'ler999',
+  'kamisamaexplorer',
+  'mangalivreto',
+  'instahentai',
+  'cafecomyaoi',
+  'euphoriascan',
+  'covenscan',
+  'brasilhentai',
+  'hentaiseason',
+  'apecomics',
+  'borutoexplorer',
+]);
+
+export type CoverPriorityTier = 1 | 2 | 3 | 4;
+export type CoverVerificationMethod = 'ocr_verified' | 'verified_hint' | 'trusted_br_source' | 'none';
+
+const MIN_ADEQUATE_COVER_WIDTH = 260;
+const MIN_ADEQUATE_COVER_HEIGHT = 360;
+const MIN_ADEQUATE_COVER_VISUAL_SCORE = 40;
+const COVER_OCR_CACHE_LIMIT = 500;
+const DEFAULT_MAX_OCR_CANDIDATES = 3;
+const DEFAULT_OCR_TIMEOUT_MS = 4_000;
+
+const coverOcrCache = new Map<string, CoverInspectionResult>();
+
+function setBoundedCoverOcrCache(sha256: string, result: CoverInspectionResult): void {
+  if (coverOcrCache.has(sha256)) {
+    coverOcrCache.delete(sha256);
+  } else if (coverOcrCache.size >= COVER_OCR_CACHE_LIMIT) {
+    const oldestKey = coverOcrCache.keys().next().value;
+    if (oldestKey) coverOcrCache.delete(oldestKey);
+  }
+  coverOcrCache.set(sha256, result);
+}
+
+async function inspectCoverWithCacheAndTimeout(
+  bytes: Uint8Array,
+  title: string,
+  aliases: readonly string[],
+  source: string,
+  timeoutMs: number,
+): Promise<CoverInspectionResult | undefined> {
+  const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+  const cached = coverOcrCache.get(sha256);
+  if (cached) {
+    coverOcrCache.delete(sha256);
+    coverOcrCache.set(sha256, cached);
+    return cached;
+  }
+
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const res = await Promise.race([
+      inspectCoverForPtBrTitle({
+        title,
+        aliases,
+        coverBuffer: Buffer.from(bytes),
+        source,
+      }),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+    if (res) {
+      setBoundedCoverOcrCache(sha256, res);
+    }
+    return res;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export function isVisuallyAdequatePtBrCover(info: ImageInfo, visualScore: number): boolean {
+  return (
+    visualScore >= MIN_ADEQUATE_COVER_VISUAL_SCORE &&
+    info.width >= MIN_ADEQUATE_COVER_WIDTH &&
+    info.height >= MIN_ADEQUATE_COVER_HEIGHT
+  );
+}
 
 export interface P2MainSourceEvidence {
   sourceId: string;
@@ -39,6 +141,9 @@ export interface P2MainSourceEvidence {
   coverUrl?: string | null;
   coverBytes?: Uint8Array | null;
   coverHasPtBrTextHint?: boolean;
+  coverPtBrVerified?: boolean;
+  isBrazilianSource?: boolean;
+  coverVerificationMethod?: CoverVerificationMethod;
   author?: string | null;
   artist?: string | null;
   genres?: string[];
@@ -90,7 +195,11 @@ export interface SelectedCoverCandidate {
   bytes: Uint8Array;
   info: ImageInfo;
   visualScore: number;
+  coverTier: CoverPriorityTier;
   hasPtBrTitle: boolean;
+  isBrazilianSource: boolean;
+  visuallyAdequate: boolean;
+  verificationMethod: CoverVerificationMethod;
   ptBrCoverConfidence: number;
   ocrResult?: CoverInspectionResult;
 }
@@ -121,6 +230,7 @@ export interface P2WorkQualityReport {
   selectedTitle: {
     title: string;
     language: 'pt-BR' | 'intl';
+    titleTier: TitlePriorityTier;
     source: string;
     qualityScore: number;
     corroboratedBy: string[];
@@ -133,7 +243,10 @@ export interface P2WorkQualityReport {
     height: number;
     byteLength: number;
     visualScore: number;
+    coverTier: CoverPriorityTier;
     hasPtBrTitle: boolean;
+    verificationMethod: CoverVerificationMethod;
+    ptBrConfidence: number;
   } | null;
   selectedSynopsis: {
     text: string;
@@ -423,11 +536,11 @@ export class P2MetadataConsolidator {
       }
     }
 
-    // 3. Select Best Proven Title (PT-BR priority without invented translations)
-    // Confirmed ALIAS_ONLY sources may add a bounded corroboration bonus ONLY to
-    // titles already provided by valid main sources (zero ALIAS_ONLY leakage).
+    // 3. Select Best Proven Title (Strict 4-tier PT-BR preference without invented translations)
+    // Order: (1) Verified PT-BR -> (2) Reliable PT variant -> (3) International EN -> (4) Original foreign
     const titleScoreMap = new Map<string, {
       display: string;
+      titleTier: TitlePriorityTier;
       isPtBr: boolean;
       sources: Set<string>;
       aliasCorroborators: number;
@@ -437,8 +550,8 @@ export class P2MetadataConsolidator {
     for (const t of gatheredTitles) {
       const key = alternativeTitleKey(t.title);
       if (!key) continue;
-      const pt = t.isExplicitPt || isPtBrTitle(t.title) || isPortugueseAlias(t.title);
-      const consecrated = isConsecratedProperTitle(t.title);
+      if (PT_PT_REJECTED_ALIASES.has(key)) continue;
+      const cls = classifyTitlePriorityTier(t.title, t.isExplicitPt);
       const aliasMatches =
         aliasBuckets.get(key)?.sources.filter((s) => P2_MAX_SYNTHETIC_BYPASS_SOURCES.has(s)).length ?? 0;
       const aliasBonus = Math.min(18, aliasMatches * 6);
@@ -446,7 +559,8 @@ export class P2MetadataConsolidator {
       if (!entry) {
         entry = {
           display: t.title,
-          isPtBr: pt,
+          titleTier: cls.tier,
+          isPtBr: cls.isPtBr || cls.isPtOther,
           sources: new Set([t.source]),
           aliasCorroborators: aliasMatches,
           score: 0,
@@ -454,17 +568,18 @@ export class P2MetadataConsolidator {
         titleScoreMap.set(key, entry);
       } else {
         entry.sources.add(t.source);
-        if (pt) entry.isPtBr = true;
+        if (cls.tier < entry.titleTier) entry.titleTier = cls.tier;
+        if (cls.isPtBr || cls.isPtOther) entry.isPtBr = true;
         entry.aliasCorroborators = Math.max(entry.aliasCorroborators, aliasMatches);
         if (entry.display.length < t.title.length && t.title.length <= 70) {
           entry.display = t.title;
         }
       }
-      // Prefer PT-BR proven across main sources, or consecrated franchise names,
-      // and penalize ultra-short exclamation fragments (e.g. "JUST!!", "With!!")
       const isShortNoise = /^[a-z0-9]{1,6}[!?.]*$/i.test(t.title.trim()) && t.title.trim().split(/\s+/).length === 1;
+      const tierBase =
+        entry.titleTier === 1 ? 80 : entry.titleTier === 2 ? 60 : cls.isConsecrated ? 45 : entry.titleTier === 3 ? 28 : 14;
       entry.score =
-        (entry.isPtBr ? 60 : consecrated ? 45 : 20) +
+        tierBase +
         Math.min(30, entry.sources.size * 12) +
         aliasBonus +
         (t.title.length >= 8 && t.title.length <= 90 && !isShortNoise ? 10 : isShortNoise ? -10 : 0);
@@ -472,6 +587,7 @@ export class P2MetadataConsolidator {
 
     const rankedTitles = [...titleScoreMap.values()].sort(
       (a, b) =>
+        a.titleTier - b.titleTier ||
         b.score - a.score ||
         b.sources.size - a.sources.size ||
         b.aliasCorroborators - a.aliasCorroborators ||
@@ -482,7 +598,8 @@ export class P2MetadataConsolidator {
     const selectedTitle = chosenTitleEntry
       ? {
           title: chosenTitleEntry.display,
-          language: (chosenTitleEntry.isPtBr ? 'pt-BR' : 'intl') as 'pt-BR' | 'intl',
+          language: (chosenTitleEntry.titleTier <= 2 ? 'pt-BR' : 'intl') as 'pt-BR' | 'intl',
+          titleTier: chosenTitleEntry.titleTier,
           source: [...chosenTitleEntry.sources][0],
           qualityScore: chosenTitleEntry.score,
           corroboratedBy: [...chosenTitleEntry.sources],
@@ -510,55 +627,126 @@ export class P2MetadataConsolidator {
     validSynopses.sort((a, b) => b.qualityScore - a.qualityScore);
     const selectedSynopsis = validSynopses[0] ?? null;
 
-    // 5. Intelligent Cover Selection (43 main sources only)
-    const validCovers: SelectedCoverCandidate[] = [];
+    // 5. Intelligent 4-Tier Cover Selection (43 main sources only, zero filename spoofing)
+    const preInspectedCovers: Array<{
+      evidence: P2MainSourceEvidence;
+      info: ImageInfo;
+      visualScore: number;
+      visuallyAdequate: boolean;
+      isBrazilianSource: boolean;
+      preVerifiedPtBr: boolean;
+      verificationMethod: CoverVerificationMethod;
+      bytes: Uint8Array;
+    }> = [];
+
     for (const m of usableMain) {
       if (!m.coverBytes || m.coverBytes.byteLength < 1500) continue;
       try {
         const info = inspectImage(m.coverBytes);
         const visualScore = scoreCoverVisualQuality(info, m.coverBytes.byteLength);
         if (visualScore === 0) continue;
-
-        let hasPtBrTitle = Boolean(m.coverHasPtBrTextHint);
-        let ptBrCoverConfidence = hasPtBrTitle ? 0.85 : 0;
-        let ocrResult: CoverInspectionResult | undefined;
-
-        if (!hasPtBrTitle && this.options.runOcrOnCovers && selectedTitle) {
-          ocrResult = await inspectCoverForPtBrTitle({
-            title: selectedTitle.title,
-            aliases: [...aliasBuckets.values()].map((a) => a.alias),
-            coverBuffer: Buffer.from(m.coverBytes),
-            source: m.sourceId,
-          });
-          if (ocrResult.foundPtBrTitle) {
-            hasPtBrTitle = true;
-            ptBrCoverConfidence = ocrResult.confidence;
-          }
-        }
-
-        validCovers.push({
-          source: m.sourceId,
-          coverUrl: m.coverUrl ?? null,
-          bytes: m.coverBytes,
+        const visuallyAdequate = isVisuallyAdequatePtBrCover(info, visualScore);
+        const isBrazilianSource = Boolean(m.isBrazilianSource) || BRAZILIAN_TRUSTED_SOURCES.has(m.sourceId);
+        // Never treat filename/URL strings as PT-BR proof; require explicit verified flag/hint.
+        const preVerifiedPtBr = Boolean(m.coverPtBrVerified || m.coverHasPtBrTextHint);
+        const verificationMethod: CoverVerificationMethod = preVerifiedPtBr
+          ? (m.coverVerificationMethod ?? 'verified_hint')
+          : isBrazilianSource
+            ? 'trusted_br_source'
+            : 'none';
+        preInspectedCovers.push({
+          evidence: m,
           info,
           visualScore,
-          hasPtBrTitle,
-          ptBrCoverConfidence,
-          ocrResult,
+          visuallyAdequate,
+          isBrazilianSource,
+          preVerifiedPtBr,
+          verificationMethod,
+          bytes: m.coverBytes,
         });
       } catch {
         // Broken/corrupt image rejected strictly (HTML-200 or invalid header)
       }
     }
 
+    // Order OCR checks so Brazilian visually adequate covers run first, bounded to max 3 candidates
+    const ocrOrdered = [...preInspectedCovers].sort(
+      (a, b) =>
+        Number(b.visuallyAdequate) - Number(a.visuallyAdequate) ||
+        Number(b.isBrazilianSource) - Number(a.isBrazilianSource) ||
+        b.visualScore - a.visualScore,
+    );
+    let ocrAttempts = 0;
+    const validCovers: SelectedCoverCandidate[] = [];
+
+    for (const item of ocrOrdered) {
+      let hasPtBrTitle = item.visuallyAdequate && item.preVerifiedPtBr;
+      let ptBrCoverConfidence = hasPtBrTitle ? (item.evidence.coverPtBrVerified ? 0.95 : 0.85) : 0;
+      let verificationMethod: CoverVerificationMethod = hasPtBrTitle
+        ? (item.evidence.coverVerificationMethod ?? 'verified_hint')
+        : item.visuallyAdequate && item.isBrazilianSource
+          ? 'trusted_br_source'
+          : 'none';
+      let ocrResult: CoverInspectionResult | undefined;
+
+      const alreadyHasTier1 = validCovers.some((c) => c.coverTier === 1);
+      if (
+        !hasPtBrTitle &&
+        item.visuallyAdequate &&
+        !alreadyHasTier1 &&
+        this.options.runOcrOnCovers &&
+        selectedTitle &&
+        ocrAttempts < DEFAULT_MAX_OCR_CANDIDATES
+      ) {
+        ocrAttempts += 1;
+        ocrResult = await inspectCoverWithCacheAndTimeout(
+          item.bytes,
+          selectedTitle.title,
+          [...aliasBuckets.values()].map((a) => a.alias),
+          item.evidence.sourceId,
+          DEFAULT_OCR_TIMEOUT_MS,
+        );
+        if (ocrResult?.foundPtBrTitle) {
+          hasPtBrTitle = true;
+          ptBrCoverConfidence = ocrResult.confidence;
+          verificationMethod = 'ocr_verified';
+        }
+      }
+
+      const coverTier: CoverPriorityTier =
+        item.visuallyAdequate && hasPtBrTitle
+          ? 1
+          : item.visuallyAdequate && item.isBrazilianSource
+            ? 2
+            : item.visualScore >= 50
+              ? 3
+              : 4;
+
+      validCovers.push({
+        source: item.evidence.sourceId,
+        coverUrl: item.evidence.coverUrl ?? null,
+        bytes: item.bytes,
+        info: item.info,
+        visualScore: item.visualScore,
+        coverTier,
+        hasPtBrTitle,
+        isBrazilianSource: item.isBrazilianSource,
+        visuallyAdequate: item.visuallyAdequate,
+        verificationMethod,
+        ptBrCoverConfidence,
+        ocrResult,
+      });
+    }
+
     let chosenCover: SelectedCoverCandidate | null = null;
     if (validCovers.length > 0) {
-      const sortedByQuality = [...validCovers].sort((a, b) => b.visualScore - a.visualScore);
-      const topQuality = sortedByQuality[0];
-      const ptBrComparable = sortedByQuality.find(
-        (c) => c.hasPtBrTitle && c.visualScore >= 45 && topQuality.visualScore - c.visualScore <= 18,
+      validCovers.sort(
+        (a, b) =>
+          a.coverTier - b.coverTier ||
+          b.ptBrCoverConfidence - a.ptBrCoverConfidence ||
+          b.visualScore - a.visualScore,
       );
-      chosenCover = ptBrComparable ?? topQuality;
+      chosenCover = validCovers[0];
     }
 
     // 6. Identity Verification Against Existing Catalog (Anti-Duplication)
@@ -706,7 +894,10 @@ export class P2MetadataConsolidator {
             height: chosenCover.info.height,
             byteLength: chosenCover.bytes.byteLength,
             visualScore: chosenCover.visualScore,
+            coverTier: chosenCover.coverTier,
             hasPtBrTitle: chosenCover.hasPtBrTitle,
+            verificationMethod: chosenCover.verificationMethod,
+            ptBrConfidence: Number(chosenCover.ptBrCoverConfidence.toFixed(3)),
           }
         : null,
       selectedSynopsis,
@@ -715,12 +906,17 @@ export class P2MetadataConsolidator {
       gateApproved,
     };
 
+    const chosenTitleKey = selectedTitle ? alternativeTitleKey(selectedTitle.title) : '';
+    const nonDuplicateAliases = chosenTitleKey
+      ? candidateAliases.filter((a) => alternativeTitleKey(a) !== chosenTitleKey)
+      : candidateAliases;
+
     const consolidatedPayload = selectedTitle
       ? {
           title: selectedTitle.title,
           slug: safeSlugify(selectedTitle.title),
           synopsis: selectedSynopsis ? selectedSynopsis.text : null,
-          aliases: candidateAliases,
+          aliases: nonDuplicateAliases,
           author: candidateAuthor ?? null,
           artist: candidateArtist ?? null,
           genres: [...allGenres],
@@ -729,6 +925,7 @@ export class P2MetadataConsolidator {
             title: {
               source: selectedTitle.source,
               language: selectedTitle.language,
+              title_tier: selectedTitle.titleTier,
               quality_score: selectedTitle.qualityScore,
               localized_ptbr: selectedTitle.language === 'pt-BR',
               corroborated_by: selectedTitle.corroboratedBy,
@@ -740,7 +937,10 @@ export class P2MetadataConsolidator {
                   cover: {
                     source: chosenCover.source,
                     quality_score: chosenCover.visualScore,
+                    cover_tier: chosenCover.coverTier,
                     has_ptbr_title: chosenCover.hasPtBrTitle,
+                    verification_method: chosenCover.verificationMethod,
+                    ptbr_confidence: Number(chosenCover.ptBrCoverConfidence.toFixed(3)),
                     updated_at: nowIso,
                     owner: 'importer-p2-v3',
                   },
@@ -759,7 +959,7 @@ export class P2MetadataConsolidator {
               : {}),
             aliases: {
               sources: [...new Set([...mainSourcesRespondedValid, ...aliasSourcesValid])],
-              count: candidateAliases.length,
+              count: nonDuplicateAliases.length,
               updated_at: nowIso,
               owner: 'importer-p2-v3',
             },

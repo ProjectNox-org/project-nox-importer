@@ -13,6 +13,25 @@ export declare const PT_PT_REJECTED_ALIASES: Set<string>;
 export declare function cleanPtBrCandidateTitle(raw: string): string | null;
 export declare function isPtBrTitle(rawTitle: string): boolean;
 export declare function isConsecratedProperTitle(rawTitle: string): boolean;
+/**
+ * Protects manual/admin/editorial locks and Third-AI historical recovery fields
+ * against unverified overwrites during automated P0/P1/P2 synchronization.
+ */
+export declare function isProtectedEditorialProvenance(fieldProv: Record<string, any> | null | undefined): boolean;
+export type TitlePriorityTier = 1 | 2 | 3 | 4;
+/**
+ * 4-tier title preference for Brazilian catalog presentation:
+ * 1: Official/proven PT-BR title
+ * 2: Reliable secondary Portuguese title
+ * 3: International / English / consecrated Latin title
+ * 4: Original Japanese/Korean/Chinese/Romaji/other script title
+ */
+export declare function classifyTitlePriorityTier(rawTitle: string, isExplicitPt?: boolean): {
+    tier: TitlePriorityTier;
+    isPtBr: boolean;
+    isPtOther: boolean;
+    isConsecrated: boolean;
+};
 export interface AutomaticPtBrTitlePromotionInput {
     workId?: string;
     slug?: string;

@@ -9,6 +9,7 @@
 
 import crypto from 'node:crypto';
 import { computeMergedWorkAliases } from '../alias-sources/identity-verifier.js';
+import { isProtectedEditorialProvenance, isPtBrTitle } from '../core/ptbr-title-localization.js';
 import { processAndStoreMedia, type StoredMediaResult } from '../storage/media.js';
 import type { StorageProvider } from '../storage/provider.js';
 import {
@@ -61,11 +62,17 @@ export interface P2OnboardingPersistence {
   }): Promise<{ workId: string; enrolledP1: boolean; enrolledP0: boolean }>;
   enrichExistingWorkSafe(input: {
     workId: string;
+    incomingTitle?: string | null;
+    incomingTitleLanguage?: 'pt-BR' | 'intl' | null;
+    incomingTitleTier?: 1 | 2 | 3 | 4 | null;
     incomingAliases: string[];
     incomingSynopsis: string | null;
     incomingSynopsisScore: number;
     incomingCoverMediaId: string | null;
     incomingCoverScore: number;
+    incomingCoverHasPtBrTitle?: boolean;
+    incomingCoverTier?: 1 | 2 | 3 | 4;
+    incomingCoverVerificationMethod?: string;
     incomingMappings: Array<{ source: string; sourceWorkId: string; sourceTitle?: string }>;
     provenance: Record<string, any>;
   }): Promise<{ updatedFields: string[]; preservedManualFields: string[]; skippedLockBusy: boolean }>;
@@ -157,11 +164,17 @@ export class InMemoryP2OnboardingPersistence implements P2OnboardingPersistence 
 
   async enrichExistingWorkSafe(input: {
     workId: string;
+    incomingTitle?: string | null;
+    incomingTitleLanguage?: 'pt-BR' | 'intl' | null;
+    incomingTitleTier?: 1 | 2 | 3 | 4 | null;
     incomingAliases: string[];
     incomingSynopsis: string | null;
     incomingSynopsisScore: number;
     incomingCoverMediaId: string | null;
     incomingCoverScore: number;
+    incomingCoverHasPtBrTitle?: boolean;
+    incomingCoverTier?: 1 | 2 | 3 | 4;
+    incomingCoverVerificationMethod?: string;
     incomingMappings: Array<{ source: string; sourceWorkId: string; sourceTitle?: string }>;
     provenance: Record<string, any>;
   }): Promise<{ updatedFields: string[]; preservedManualFields: string[]; skippedLockBusy: boolean }> {
@@ -175,10 +188,36 @@ export class InMemoryP2OnboardingPersistence implements P2OnboardingPersistence 
     const updatedFields: string[] = [];
     const preservedManualFields: string[] = [];
 
-    if (prov.title?.source === 'manual') preservedManualFields.push('title');
-    if (prov.slug?.source === 'manual') preservedManualFields.push('slug');
+    const titleProtected =
+      isProtectedEditorialProvenance(prov.title) ||
+      prov.title?.localized_ptbr === true ||
+      isPtBrTitle(work.title);
+    if (isProtectedEditorialProvenance(prov.title)) preservedManualFields.push('title');
+    if (isProtectedEditorialProvenance(prov.slug)) preservedManualFields.push('slug');
 
-    // Additive alias union preserving all pre-existing aliases
+    let nextTitle = work.title;
+    if (
+      !titleProtected &&
+      input.incomingTitle &&
+      (input.incomingTitleLanguage === 'pt-BR' || (input.incomingTitleTier !== undefined && input.incomingTitleTier !== null && input.incomingTitleTier <= 2))
+    ) {
+      const previousTitle = work.title;
+      nextTitle = input.incomingTitle;
+      work.title = nextTitle;
+      prov.title = {
+        ...(input.provenance.title || {}),
+        localized_ptbr: true,
+        previous_value: previousTitle,
+      };
+      updatedFields.push('title');
+    }
+
+    // Additive alias union preserving all pre-existing aliases + previous title if upgraded
+    const aliasSeed = [
+      ...input.incomingAliases,
+      ...(nextTitle !== work.title ? [work.title] : []),
+      ...(updatedFields.includes('title') && prov.title?.previous_value ? [String(prov.title.previous_value)] : []),
+    ];
     const mergedAliases = computeMergedWorkAliases(
       {
         id: work.id,
@@ -188,7 +227,7 @@ export class InMemoryP2OnboardingPersistence implements P2OnboardingPersistence 
         author: work.author || null,
         artist: work.artist || null,
       },
-      input.incomingAliases.map((title) => ({ title })),
+      aliasSeed.map((title) => ({ title })),
     ).aliasesAfter;
 
     if (mergedAliases.length !== (work.aliases || []).length) {
@@ -196,8 +235,8 @@ export class InMemoryP2OnboardingPersistence implements P2OnboardingPersistence 
       updatedFields.push('aliases');
     }
 
-    // Monotonicity + manual lock on synopsis
-    if (prov.synopsis?.source === 'manual') {
+    // Monotonicity + manual / Third-AI lock on synopsis
+    if (isProtectedEditorialProvenance(prov.synopsis)) {
       preservedManualFields.push('synopsis');
     } else if (
       input.incomingSynopsis &&
@@ -208,15 +247,31 @@ export class InMemoryP2OnboardingPersistence implements P2OnboardingPersistence 
       updatedFields.push('synopsis');
     }
 
-    // Monotonicity + manual lock on cover
-    if (prov.cover?.source === 'manual') {
+    // Cover Precedence: manual/third-AI immutable; valid PT-BR cover NEVER downgraded to foreign
+    const existingCoverIsPtBr = prov.cover?.has_ptbr_title === true || prov.cover?.cover_tier === 1;
+    const incomingCoverIsPtBr = Boolean(input.incomingCoverHasPtBrTitle) || input.incomingCoverTier === 1;
+    const existingCoverTier: number = Number(prov.cover?.cover_tier ?? (existingCoverIsPtBr ? 1 : 4));
+    const incomingCoverTier: number = Number(input.incomingCoverTier ?? (incomingCoverIsPtBr ? 1 : 4));
+
+    if (isProtectedEditorialProvenance(prov.cover)) {
+      preservedManualFields.push('cover');
+    } else if (existingCoverIsPtBr && !incomingCoverIsPtBr) {
       preservedManualFields.push('cover');
     } else if (
       input.incomingCoverMediaId &&
-      input.incomingCoverScore > Number(prov.cover?.quality_score ?? 0)
+      (!work.coverMediaId ||
+        incomingCoverTier < existingCoverTier ||
+        (incomingCoverTier === existingCoverTier && input.incomingCoverScore > Number(prov.cover?.quality_score ?? 0)))
     ) {
+      const previousCoverId = work.coverMediaId ?? null;
       work.coverMediaId = input.incomingCoverMediaId;
-      prov.cover = input.provenance.cover;
+      prov.cover = {
+        ...(input.provenance.cover || {}),
+        ...(previousCoverId ? { previous_cover_id: previousCoverId } : {}),
+        has_ptbr_title: incomingCoverIsPtBr,
+        cover_tier: incomingCoverTier,
+        verification_method: input.incomingCoverVerificationMethod || input.provenance.cover?.verification_method || 'none',
+      };
       updatedFields.push('cover');
     }
 
@@ -373,11 +428,17 @@ export class P2OnboardingPipeline {
         }
         await this.persistence.enrichExistingWorkSafe({
           workId: consolidated.report.matchedWorkId,
+          incomingTitle: consolidated.report.selectedTitle?.title || null,
+          incomingTitleLanguage: consolidated.report.selectedTitle?.language || null,
+          incomingTitleTier: consolidated.report.selectedTitle?.titleTier ?? null,
           incomingAliases: consolidated.consolidatedPayload?.aliases || [],
           incomingSynopsis: consolidated.report.selectedSynopsis?.text || null,
           incomingSynopsisScore: consolidated.report.selectedSynopsis?.qualityScore ?? 0,
           incomingCoverMediaId: coverId,
           incomingCoverScore: consolidated.report.selectedCover?.visualScore ?? 0,
+          incomingCoverHasPtBrTitle: consolidated.report.selectedCover?.hasPtBrTitle ?? false,
+          incomingCoverTier: consolidated.report.selectedCover?.coverTier,
+          incomingCoverVerificationMethod: consolidated.report.selectedCover?.verificationMethod,
           incomingMappings: consolidated.consolidatedPayload?.mappings || [],
           provenance: consolidated.consolidatedPayload?.provenance || {},
         });

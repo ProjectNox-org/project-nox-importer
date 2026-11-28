@@ -11,8 +11,17 @@
  */
 import { type AliasSourceCandidate } from '../alias-sources/types.js';
 import { type CoverInspectionResult } from '../core/cover-vision-inspector.js';
+import { type TitlePriorityTier } from '../core/ptbr-title-localization.js';
 import { type ImageInfo } from '../storage/media.js';
 export declare const P2_MAX_SYNTHETIC_BYPASS_SOURCES: Set<string>;
+/**
+ * Audited Brazilian PT-BR sources whose visually adequate covers are eligible
+ * for Tier 2 (legitimate BR source cover) when no OCR/verified PT-BR cover is available.
+ */
+export declare const BRAZILIAN_TRUSTED_SOURCES: Set<string>;
+export type CoverPriorityTier = 1 | 2 | 3 | 4;
+export type CoverVerificationMethod = 'ocr_verified' | 'verified_hint' | 'trusted_br_source' | 'none';
+export declare function isVisuallyAdequatePtBrCover(info: ImageInfo, visualScore: number): boolean;
 export interface P2MainSourceEvidence {
     sourceId: string;
     sourceWorkId: string;
@@ -24,6 +33,9 @@ export interface P2MainSourceEvidence {
     coverUrl?: string | null;
     coverBytes?: Uint8Array | null;
     coverHasPtBrTextHint?: boolean;
+    coverPtBrVerified?: boolean;
+    isBrazilianSource?: boolean;
+    coverVerificationMethod?: CoverVerificationMethod;
     author?: string | null;
     artist?: string | null;
     genres?: string[];
@@ -81,7 +93,11 @@ export interface SelectedCoverCandidate {
     bytes: Uint8Array;
     info: ImageInfo;
     visualScore: number;
+    coverTier: CoverPriorityTier;
     hasPtBrTitle: boolean;
+    isBrazilianSource: boolean;
+    visuallyAdequate: boolean;
+    verificationMethod: CoverVerificationMethod;
     ptBrCoverConfidence: number;
     ocrResult?: CoverInspectionResult;
 }
@@ -118,6 +134,7 @@ export interface P2WorkQualityReport {
     selectedTitle: {
         title: string;
         language: 'pt-BR' | 'intl';
+        titleTier: TitlePriorityTier;
         source: string;
         qualityScore: number;
         corroboratedBy: string[];
@@ -130,7 +147,10 @@ export interface P2WorkQualityReport {
         height: number;
         byteLength: number;
         visualScore: number;
+        coverTier: CoverPriorityTier;
         hasPtBrTitle: boolean;
+        verificationMethod: CoverVerificationMethod;
+        ptBrConfidence: number;
     } | null;
     selectedSynopsis: {
         text: string;
