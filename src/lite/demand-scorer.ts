@@ -9,6 +9,11 @@
  * - Hysteresis (+10%) to avoid churning focused cohort works unnecessarily
  */
 
+import {
+  DiversitySelectionHistory,
+  normalizeDynamicTaxonomyTags,
+} from './dynamic-diversity-history.js';
+
 export interface WorkDemandSignals {
   workId: string;
   views24h: number;
@@ -136,11 +141,13 @@ export function selectDiverseP1Cohort(
     existingCohort?: readonly WorkDemandSignals[];
     randomFn?: () => number;
     jitterPoints?: number;
+    history?: DiversitySelectionHistory;
   } = {},
 ): { selectedIds: string[]; ranked: DemandScoreResult[] } {
   const targetPick = Math.max(0, Math.floor(openSlots));
   const randomFn = options.randomFn ?? Math.random;
   const jitterPoints = Math.max(0, options.jitterPoints ?? 12);
+  const histProfile = options.history ? options.history.getDecayedProfile() : null;
 
   const genreCounts = new Map<string, number>();
   const kindCounts = new Map<string, number>();
@@ -151,9 +158,8 @@ export function selectDiverseP1Cohort(
 
   const bump = <K>(map: Map<K, number>, key: K) => map.set(key, (map.get(key) ?? 0) + 1);
   const recordWork = (w: WorkDemandSignals) => {
-    for (const g of w.genres || []) {
-      const ng = normVal(g, '');
-      if (ng) bump(genreCounts, ng);
+    for (const g of normalizeDynamicTaxonomyTags(w.genres)) {
+      bump(genreCounts, g);
     }
     if (w.kind) bump(kindCounts, normVal(w.kind));
     if (w.contentRating) bump(ratingCounts, normVal(w.contentRating));
@@ -169,8 +175,10 @@ export function selectDiverseP1Cohort(
   }
 
   const baseScores = new Map<string, DemandScoreResult>();
+  const cleanGenresById = new Map<string, string[]>();
   for (const c of candidates) {
     baseScores.set(c.workId, scoreWorkDemand(c));
+    cleanGenresById.set(c.workId, normalizeDynamicTaxonomyTags(c.genres));
   }
 
   const pool = [...candidates];
@@ -191,13 +199,16 @@ export function selectDiverseP1Cohort(
       const base = baseScores.get(c.workId)!.score;
       let divBonus = 0;
 
-      const genres = (c.genres || []).map((g) => normVal(g, '')).filter(Boolean);
+      const genres = cleanGenresById.get(c.workId) || [];
       if (genres.length > 0) {
         let unseenGenres = 0;
         for (const g of genres) {
           if ((genreCounts.get(g) ?? 0) === 0) unseenGenres++;
         }
-        divBonus += unseenGenres > 0 ? Math.min(28, 18 + (unseenGenres - 1) * 5) : 0;
+        // Evaluates ALL normalized tags (beyond tag #5) with sublinear scaling
+        if (unseenGenres > 0) {
+          divBonus += Math.min(34, 16 + (unseenGenres / Math.sqrt(genres.length)) * 8);
+        }
       }
 
       if (c.kind) {
@@ -223,7 +234,22 @@ export function selectDiverseP1Cohort(
       const missBucket = classifyMissingBucket(remaining);
       divBonus += (missingCounts.get(missBucket) ?? 0) === 0 ? 10 : 0;
 
-      const total = base + divBonus + (jitterById.get(c.workId) ?? 0);
+      const crossCohortDelta = options.history && histProfile
+        ? options.history.computeCrossCohortAdjustment(
+            {
+              genres,
+              preNormalized: true,
+              source: src ?? null,
+              kind: c.kind ?? null,
+              contentRating: c.contentRating ?? null,
+              popularityTier: popTier,
+            },
+            { genreCounts, sourceCounts, kindCounts, ratingCounts, popularityCounts },
+            histProfile,
+          ).totalBonus
+        : 0;
+
+      const total = base + divBonus + crossCohortDelta + (jitterById.get(c.workId) ?? 0);
       if (total > bestScore) {
         bestScore = total;
         bestIdx = i;

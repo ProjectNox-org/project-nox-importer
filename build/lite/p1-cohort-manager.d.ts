@@ -11,6 +11,7 @@
  * - Authenticated & auditable STAFF onboarding remains an isolated exception (priority STAFF < P0).
  */
 import { type WorkDemandSignals } from './demand-scorer.js';
+import { DiversitySelectionHistory } from './dynamic-diversity-history.js';
 export type P2GateState = 'PAUSED_P1_BUSY' | 'ELIGIBLE_P1_DEFICIT' | 'ELIGIBLE_P1_EMPTY' | 'ELIGIBLE_P1_ALL_BLOCKED';
 export interface P2ReplenishmentPlan {
     targetSize: number;
@@ -24,6 +25,7 @@ export interface P1CohortControllerOptions {
     enableDeficitReplenishment?: boolean;
     enableDiversity?: boolean;
     randomFn?: () => number;
+    diversityHistory?: DiversitySelectionHistory;
 }
 export interface P1CohortBottleneckMetrics {
     rssMiB?: number;
@@ -53,7 +55,9 @@ export declare class P1CohortAndP2GateController {
     private readonly enableDeficitReplenishment;
     private readonly enableDiversity;
     private readonly randomFn?;
+    private readonly diversityHistory?;
     constructor(options?: P1CohortControllerOptions);
+    getDiversityHistory(): DiversitySelectionHistory | undefined;
     seedWorks(initial: readonly P1WorkState[]): void;
     getTargetSize(): number;
     getActiveCohortIds(): string[];

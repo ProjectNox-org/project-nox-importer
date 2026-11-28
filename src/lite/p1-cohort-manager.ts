@@ -14,8 +14,13 @@
 import {
   selectDiverseP1Cohort,
   selectFocusedP1Cohort,
+  classifyPopularityTier,
   type WorkDemandSignals,
 } from './demand-scorer.js';
+import {
+  DiversitySelectionHistory,
+  normalizeDynamicTaxonomyTags,
+} from './dynamic-diversity-history.js';
 
 export type P2GateState =
   | 'PAUSED_P1_BUSY'
@@ -36,6 +41,7 @@ export interface P1CohortControllerOptions {
   enableDeficitReplenishment?: boolean;
   enableDiversity?: boolean;
   randomFn?: () => number;
+  diversityHistory?: DiversitySelectionHistory;
 }
 
 export interface P1CohortBottleneckMetrics {
@@ -81,11 +87,18 @@ export class P1CohortAndP2GateController {
   private readonly enableDeficitReplenishment: boolean;
   private readonly enableDiversity: boolean;
   private readonly randomFn?: () => number;
+  private readonly diversityHistory?: DiversitySelectionHistory;
 
   constructor(options: P1CohortControllerOptions = {}) {
     this.enableDeficitReplenishment = Boolean(options.enableDeficitReplenishment);
     this.enableDiversity = Boolean(options.enableDiversity);
     this.randomFn = options.randomFn;
+    this.diversityHistory = options.diversityHistory
+      ?? (this.enableDiversity ? new DiversitySelectionHistory() : undefined);
+  }
+
+  getDiversityHistory(): DiversitySelectionHistory | undefined {
+    return this.diversityHistory;
   }
 
   seedWorks(initial: readonly P1WorkState[]): void {
@@ -159,6 +172,7 @@ export class P1CohortAndP2GateController {
     targetSize: number;
     p2GateState: P2GateState;
   } {
+    const prevCohortSet = new Set(this.cohortIds);
     this.targetSize = computeAdaptiveCohortSize(bottleneck);
 
     // Keep still-executable or running, non-blocked current cohort members first (slot stability),
@@ -198,12 +212,34 @@ export class P1CohortAndP2GateController {
         .map((id) => this.works.get(id))
         .filter((w): w is P1WorkState => Boolean(w));
       const { selectedIds } = this.enableDiversity
-        ? selectDiverseP1Cohort(fillCandidates, openSlots, { existingCohort, randomFn: this.randomFn })
+        ? selectDiverseP1Cohort(fillCandidates, openSlots, {
+            existingCohort,
+            randomFn: this.randomFn,
+            history: this.diversityHistory,
+          })
         : selectFocusedP1Cohort(fillCandidates, Math.max(5, openSlots));
       const next = [...retained, ...selectedIds.slice(0, openSlots)];
       this.cohortIds = next.slice(0, this.targetSize);
     } else {
       this.cohortIds = retained.slice(0, this.targetSize);
+    }
+
+    if (this.diversityHistory) {
+      const newlyAdmittedAt = Date.now();
+      for (const admittedId of this.cohortIds) {
+        if (prevCohortSet.has(admittedId)) continue;
+        const w = this.works.get(admittedId);
+        if (!w) continue;
+        this.diversityHistory.recordSelection({
+          workId: w.workId,
+          selectedAtMs: newlyAdmittedAt,
+          source: w.primarySource || w.availableSources?.[0] || null,
+          kind: w.kind ?? null,
+          contentRating: w.contentRating ?? null,
+          popularityTier: classifyPopularityTier(w.views7d, w.views30d),
+          genres: normalizeDynamicTaxonomyTags(w.genres),
+        });
+      }
     }
 
     if (executableCount === 0) {

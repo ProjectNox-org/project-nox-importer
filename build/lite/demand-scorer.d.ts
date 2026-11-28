@@ -8,6 +8,7 @@
  * - Anti-starvation aging for older tail works
  * - Hysteresis (+10%) to avoid churning focused cohort works unnecessarily
  */
+import { DiversitySelectionHistory } from './dynamic-diversity-history.js';
 export interface WorkDemandSignals {
     workId: string;
     views24h: number;
@@ -53,6 +54,7 @@ export declare function selectDiverseP1Cohort(candidates: readonly WorkDemandSig
     existingCohort?: readonly WorkDemandSignals[];
     randomFn?: () => number;
     jitterPoints?: number;
+    history?: DiversitySelectionHistory;
 }): {
     selectedIds: string[];
     ranked: DemandScoreResult[];

@@ -10,7 +10,8 @@
  *   without deleting pending P1 checkpoints; as soon as new P2 works enroll in P0+P1, P2 pauses again.
  * - Authenticated & auditable STAFF onboarding remains an isolated exception (priority STAFF < P0).
  */
-import { selectDiverseP1Cohort, selectFocusedP1Cohort, } from './demand-scorer.js';
+import { selectDiverseP1Cohort, selectFocusedP1Cohort, classifyPopularityTier, } from './demand-scorer.js';
+import { DiversitySelectionHistory, normalizeDynamicTaxonomyTags, } from './dynamic-diversity-history.js';
 export function computeAdaptiveCohortSize(bottleneck) {
     if (!bottleneck)
         return 10;
@@ -35,10 +36,16 @@ export class P1CohortAndP2GateController {
     enableDeficitReplenishment;
     enableDiversity;
     randomFn;
+    diversityHistory;
     constructor(options = {}) {
         this.enableDeficitReplenishment = Boolean(options.enableDeficitReplenishment);
         this.enableDiversity = Boolean(options.enableDiversity);
         this.randomFn = options.randomFn;
+        this.diversityHistory = options.diversityHistory
+            ?? (this.enableDiversity ? new DiversitySelectionHistory() : undefined);
+    }
+    getDiversityHistory() {
+        return this.diversityHistory;
     }
     seedWorks(initial) {
         this.works.clear();
@@ -102,6 +109,7 @@ export class P1CohortAndP2GateController {
         };
     }
     reconcile(bottleneck) {
+        const prevCohortSet = new Set(this.cohortIds);
         this.targetSize = computeAdaptiveCohortSize(bottleneck);
         // Keep still-executable or running, non-blocked current cohort members first (slot stability),
         // evicting completed, externally blocked, or non-executable stalled works so other works don't starve.
@@ -136,13 +144,36 @@ export class P1CohortAndP2GateController {
                 .map((id) => this.works.get(id))
                 .filter((w) => Boolean(w));
             const { selectedIds } = this.enableDiversity
-                ? selectDiverseP1Cohort(fillCandidates, openSlots, { existingCohort, randomFn: this.randomFn })
+                ? selectDiverseP1Cohort(fillCandidates, openSlots, {
+                    existingCohort,
+                    randomFn: this.randomFn,
+                    history: this.diversityHistory,
+                })
                 : selectFocusedP1Cohort(fillCandidates, Math.max(5, openSlots));
             const next = [...retained, ...selectedIds.slice(0, openSlots)];
             this.cohortIds = next.slice(0, this.targetSize);
         }
         else {
             this.cohortIds = retained.slice(0, this.targetSize);
+        }
+        if (this.diversityHistory) {
+            const newlyAdmittedAt = Date.now();
+            for (const admittedId of this.cohortIds) {
+                if (prevCohortSet.has(admittedId))
+                    continue;
+                const w = this.works.get(admittedId);
+                if (!w)
+                    continue;
+                this.diversityHistory.recordSelection({
+                    workId: w.workId,
+                    selectedAtMs: newlyAdmittedAt,
+                    source: w.primarySource || w.availableSources?.[0] || null,
+                    kind: w.kind ?? null,
+                    contentRating: w.contentRating ?? null,
+                    popularityTier: classifyPopularityTier(w.views7d, w.views30d),
+                    genres: normalizeDynamicTaxonomyTags(w.genres),
+                });
+            }
         }
         if (executableCount === 0) {
             this.p2GateState = hasPendingBlockedP1 ? 'ELIGIBLE_P1_ALL_BLOCKED' : 'ELIGIBLE_P1_EMPTY';

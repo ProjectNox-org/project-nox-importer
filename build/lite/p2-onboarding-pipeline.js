@@ -11,6 +11,7 @@ import { computeMergedWorkAliases } from '../alias-sources/identity-verifier.js'
 import { isProtectedEditorialProvenance, isPtBrTitle } from '../core/ptbr-title-localization.js';
 import { processAndStoreMedia } from '../storage/media.js';
 import { classifyPopularityTier } from './demand-scorer.js';
+import { normalizeDynamicTaxonomyTags, } from './dynamic-diversity-history.js';
 export class InMemoryP2OnboardingPersistence {
     checkpoints = new Map();
     works = new Map();
@@ -174,8 +175,14 @@ export function selectDiverseP2Candidates(candidates, limit, options = {}) {
     if (targetCount === 0 || candidates.length === 0)
         return [];
     const randomFn = options.randomFn ?? Math.random;
+    const histProfile = options.history ? options.history.getDecayedProfile() : null;
     const sourceCounts = new Map(Object.entries(options.existingFocusMix?.sources || {}));
-    const genreCounts = new Map(Object.entries(options.existingFocusMix?.genres || {}));
+    const genreCounts = new Map();
+    for (const [k, v] of Object.entries(options.existingFocusMix?.genres || {})) {
+        const clean = normalizeDynamicTaxonomyTags([k])[0];
+        if (clean)
+            genreCounts.set(clean, (genreCounts.get(clean) ?? 0) + v);
+    }
     const kindCounts = new Map(Object.entries(options.existingFocusMix?.kinds || {}));
     const ratingCounts = new Map(Object.entries(options.existingFocusMix?.contentRatings || {}));
     const popCounts = new Map();
@@ -185,38 +192,50 @@ export function selectDiverseP2Candidates(candidates, limit, options = {}) {
             map.set(k, (map.get(k) ?? 0) + 1);
     };
     const inferSource = (c) => c.primarySource || c.mainSources.find((m) => m.status === 'OK')?.sourceId || 'unknown';
-    const inferGenres = (c) => c.genres && c.genres.length > 0 ? c.genres : (c.mainSources.find((m) => m.genres?.length)?.genres || []);
-    const pool = candidates.map((cand) => ({ cand, jitter: randomFn() * 14 }));
+    const inferGenres = (c) => {
+        const raw = c.genres && c.genres.length > 0 ? c.genres : (c.mainSources.find((m) => m.genres?.length)?.genres || []);
+        return normalizeDynamicTaxonomyTags(raw);
+    };
+    const pool = candidates.map((cand) => ({
+        cand,
+        cleanGenres: inferGenres(cand),
+        jitter: randomFn() * 14,
+    }));
     const chosen = [];
     while (chosen.length < targetCount && pool.length > 0) {
         let bestIdx = 0;
         let bestScore = -Infinity;
         for (let i = 0; i < pool.length; i++) {
-            const { cand, jitter } = pool[i];
+            const { cand, cleanGenres, jitter } = pool[i];
             const src = inferSource(cand).toLowerCase();
-            const genres = inferGenres(cand).map((g) => g.toLowerCase());
-            const kind = String(cand.kind || 'MANHWA').toLowerCase();
-            const rating = String(cand.contentRating || 'GENERAL').toLowerCase();
+            const kind = String(cand.kind || 'MANHWA').toUpperCase();
+            const rating = String(cand.contentRating || 'GENERAL').toUpperCase();
             const pop = classifyPopularityTier(cand.demandSignals?.views7d ?? 50, cand.demandSignals?.views30d ?? 100);
             let score = jitter;
             const srcCount = sourceCounts.get(src) ?? 0;
             score += srcCount === 0 ? 28 : srcCount === 1 ? 10 : -srcCount * 5;
-            if (genres.some((g) => (genreCounts.get(g) ?? 0) === 0))
-                score += 20;
-            const kCount = kindCounts.get(kind) ?? 0;
+            const unseenGenres = cleanGenres.filter((g) => (genreCounts.get(g) ?? 0) === 0).length;
+            if (unseenGenres > 0) {
+                score += Math.min(34, 16 + (unseenGenres / Math.sqrt(cleanGenres.length)) * 8);
+            }
+            const kCount = kindCounts.get(kind.toLowerCase()) ?? 0;
             score += kCount === 0 ? 18 : 0;
-            const rCount = ratingCounts.get(rating) ?? 0;
+            const rCount = ratingCounts.get(rating.toLowerCase()) ?? 0;
             score += rCount === 0 ? 18 : 0;
             score += (popCounts.get(pop) ?? 0) === 0 ? 12 : 0;
+            if (options.history && histProfile) {
+                score += options.history.computeCrossCohortAdjustment({ genres: cleanGenres, preNormalized: true, source: src, kind, contentRating: rating, popularityTier: pop }, { genreCounts, sourceCounts, kindCounts, ratingCounts, popularityCounts: popCounts }, histProfile).totalBonus;
+            }
             if (score > bestScore) {
                 bestScore = score;
                 bestIdx = i;
             }
         }
-        const picked = pool.splice(bestIdx, 1)[0].cand;
+        const pickedItem = pool.splice(bestIdx, 1)[0];
+        const picked = pickedItem.cand;
         chosen.push(picked);
         bump(sourceCounts, inferSource(picked));
-        for (const g of inferGenres(picked))
+        for (const g of pickedItem.cleanGenres)
             bump(genreCounts, g);
         bump(kindCounts, picked.kind || 'MANHWA');
         bump(ratingCounts, picked.contentRating || 'GENERAL');
@@ -238,6 +257,7 @@ export class P2OnboardingPipeline {
         this.p0Scanner = p0Scanner;
     }
     async runControlledBatch(candidates, options = {}) {
+        const activeHistory = options.diversityHistory ?? this.gateController.getDiversityHistory?.();
         let effectiveCap = Math.min(10, Math.max(1, options.maxBatchSize ?? 10));
         if (!options.staffBypassAuth) {
             const snap = this.gateController.reconcile();
@@ -260,7 +280,10 @@ export class P2OnboardingPipeline {
             }
         }
         const batch = options.diversifySelection
-            ? selectDiverseP2Candidates(candidates, effectiveCap, { randomFn: options.randomFn })
+            ? selectDiverseP2Candidates(candidates, effectiveCap, {
+                randomFn: options.randomFn,
+                history: activeHistory,
+            })
             : candidates.slice(0, effectiveCap);
         const createdWorkIds = [];
         const mergedWorkIds = [];
@@ -452,6 +475,7 @@ export class P2OnboardingPipeline {
             }
         }
         let gateStateAfter = this.gateController.getP2GateState();
+        const versionBeforeEnroll = activeHistory?.getVersion() ?? 0;
         if (worksToEnrollInP1.length > 0) {
             if (options.staffBypassAuth) {
                 for (const w of worksToEnrollInP1) {
@@ -466,6 +490,20 @@ export class P2OnboardingPipeline {
             else {
                 const admission = this.gateController.tryAdmitNormalP2Batch(worksToEnrollInP1, effectiveCap);
                 gateStateAfter = admission.gateState;
+            }
+            if (activeHistory && activeHistory.getVersion() === versionBeforeEnroll) {
+                const enrolledAt = Date.now();
+                for (const w of worksToEnrollInP1) {
+                    activeHistory.recordSelection({
+                        workId: w.workId,
+                        selectedAtMs: enrolledAt,
+                        source: w.primarySource || null,
+                        kind: w.kind || null,
+                        contentRating: w.contentRating || null,
+                        popularityTier: classifyPopularityTier(w.views7d, w.views30d),
+                        genres: normalizeDynamicTaxonomyTags(w.genres),
+                    });
+                }
             }
         }
         return {
