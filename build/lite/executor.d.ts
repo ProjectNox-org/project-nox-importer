@@ -8,8 +8,8 @@ import { HostRateLimiter } from '../core/rate-limiter.js';
 import { PageByteBudget } from './page-byte-budget.js';
 import type { SourcePerformanceSnapshot, SourcePerformanceTracker } from './source-performance.js';
 export declare const KNOWN_PLACEHOLDER_HASHES: Set<string>;
-export declare const DURABLE_RESERVATION_BATCH_JOIN_MS = 120;
-export declare const DURABLE_RECEIPT_BATCH_JOIN_MS = 250;
+export declare const DURABLE_RESERVATION_BATCH_JOIN_MS = 350;
+export declare const DURABLE_RECEIPT_BATCH_JOIN_MS = 900;
 export declare const UPLOAD_BATCH_FLUSH_THRESHOLD = 24;
 export type UploadBatchSnapshot = {
     sampledFlushes: number;

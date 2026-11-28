@@ -58,7 +58,7 @@ export class NexusAdapter implements SourceAdapter {
     private transport: typeof fetch = fetch
   ) {
     this.rateLimiter.setHostRate('supabase.nexusmangas.com', 4.0, 8, 8.0);
-    this.rateLimiter.setHostRate('cdn.nexusmangas.com', 8.0, 16, 16.0);
+    this.rateLimiter.setHostRate('cdn.nexusmangas.com', 12.0, 24, 24.0);
   }
 
   private ensureCatalogLoaded(): boolean {

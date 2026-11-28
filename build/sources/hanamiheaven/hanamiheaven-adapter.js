@@ -13,7 +13,7 @@ export class HanamiHeavenAdapter {
     constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
-        this.rateLimiter.setHostRate('hanamiheaven.org', 2.0, 4, 4.0);
+        this.rateLimiter.setHostRate('hanamiheaven.org', 4.0, 8, 8.0);
     }
     get headers() {
         const cookieHeader = Array.from(this.cookies.entries())

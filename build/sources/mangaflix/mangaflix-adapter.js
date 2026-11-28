@@ -26,10 +26,10 @@ export class MangaFlixAdapter {
         // Keep the established 8 -> 16 req/s adaptive envelope on the host that
         // actually carries page bodies; otherwise it silently falls back to the
         // global 5 req/s default after every process boot.
-        this.rateLimiter.setHostRate('cdn.mangaflix.net', 8.0, 16, 16.0);
+        this.rateLimiter.setHostRate('cdn.mangaflix.net', 12.0, 24, 24.0);
         // Covers and older manifests can still point here, so retain the existing
         // policy rather than making the CDN alias a replacement.
-        this.rateLimiter.setHostRate('static.mangaflix.net', 8.0, 16, 16.0);
+        this.rateLimiter.setHostRate('static.mangaflix.net', 12.0, 24, 24.0);
     }
     get headers() {
         return {

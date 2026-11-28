@@ -18,7 +18,6 @@ const WARM_START_SLOW_PRIORS = new Set([
     'mangaflix',
     'mangotoons',
     'hipercool',
-    'manhastro',
 ]);
 function percentile(samples, q) {
     if (!samples.length)
@@ -141,17 +140,20 @@ export class SourcePerformanceTracker {
             normalizedChapterMs <= 75_000 &&
             state.ewmaSuccessRate >= 0.90 &&
             state.ewmaPageMs < 7_500;
+        const fastCompletedPace = state.sampleChapters >= 1 &&
+            normalizedChapterMs <= 55_000 &&
+            state.ewmaSuccessRate >= 0.85;
         // 1. Check SLOW conditions (with recovery hysteresis if currently SLOW).
         if (state.tier === 'SLOW') {
-            const stillSlow = !provenProductiveChapters && (state.ewmaPageMs >= 5_200 ||
-                (state.pageLatencySamples.length >= 8 && p95Ms >= 11_500 && state.ewmaPageMs >= 3_200) ||
+            const stillSlow = !provenProductiveChapters && !fastCompletedPace && (state.ewmaPageMs >= 6_000 ||
+                (state.pageLatencySamples.length >= 8 && p95Ms >= 13_500 && state.ewmaPageMs >= 3_800) ||
                 (state.sampleChapters >= 2 && normalizedChapterMs >= 95_000) ||
                 state.ewmaSuccessRate < 0.84);
             if (stillSlow)
                 return 'SLOW';
         }
         else {
-            const enterSlow = !provenProductiveChapters && (state.ewmaPageMs >= 7_000 ||
+            const enterSlow = !provenProductiveChapters && !fastCompletedPace && (state.ewmaPageMs >= 7_000 ||
                 (state.pageLatencySamples.length >= 8 && p95Ms >= 15_000 && state.ewmaPageMs >= 4_500) ||
                 (state.sampleChapters >= 2 && normalizedChapterMs >= 135_000) ||
                 ((state.sampleChapters + state.sampleFailures) >= 3 && state.ewmaSuccessRate < 0.72));

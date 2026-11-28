@@ -16,7 +16,7 @@ export class HanamiHeavenAdapter implements SourceAdapter {
     private rateLimiter: HostRateLimiter = new HostRateLimiter(2.0),
     private transport: typeof fetch = fetch
   ) {
-    this.rateLimiter.setHostRate('hanamiheaven.org', 2.0, 4, 4.0);
+    this.rateLimiter.setHostRate('hanamiheaven.org', 4.0, 8, 8.0);
   }
 
   private get headers(): Record<string, string> {

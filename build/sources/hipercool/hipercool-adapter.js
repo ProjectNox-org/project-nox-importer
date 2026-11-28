@@ -14,7 +14,7 @@ export class HipercoolAdapter {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
         this.rateLimiter.setHostRate('lerhentais.com', 2.0, 4, 4.0);
-        this.rateLimiter.setHostRate('awshc.r2d2storage.com', 8.0, 16, 16.0);
+        this.rateLimiter.setHostRate('awshc.r2d2storage.com', 12.0, 24, 24.0);
     }
     get headers() {
         const cookieHeader = Array.from(this.cookies.entries())

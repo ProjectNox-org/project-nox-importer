@@ -42,7 +42,7 @@ export class MangoToonsAdapter {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
         this.rateLimiter.setHostRate('api.mangotoons.com', 2.0, 4, 4.0);
-        this.rateLimiter.setHostRate('cdn.mangotoons.com', 8.0, 16, 16.0);
+        this.rateLimiter.setHostRate('cdn.mangotoons.com', 12.0, 24, 24.0);
         if (process.env.MANGOTOONS_TOKEN) {
             this.token = process.env.MANGOTOONS_TOKEN;
         }

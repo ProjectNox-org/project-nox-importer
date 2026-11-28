@@ -49,7 +49,7 @@ export class NexusAdapter {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
         this.rateLimiter.setHostRate('supabase.nexusmangas.com', 4.0, 8, 8.0);
-        this.rateLimiter.setHostRate('cdn.nexusmangas.com', 8.0, 16, 16.0);
+        this.rateLimiter.setHostRate('cdn.nexusmangas.com', 12.0, 24, 24.0);
     }
     ensureCatalogLoaded() {
         if (this.catalogLoaded)

@@ -114,7 +114,7 @@ export class HostRateLimiter {
     // not accelerate every source sharing this global limiter.
     if (bucket.consecutiveSuccesses >= 8) {
       bucket.consecutiveSuccesses = 0;
-      const step = 0.5;
+      const step = 1.0;
       if (bucket.ratePerSecond < bucket.maxRatePerSecond) {
         const oldRate = bucket.ratePerSecond;
         bucket.ratePerSecond = Math.min(bucket.maxRatePerSecond, bucket.ratePerSecond + step);
@@ -177,9 +177,6 @@ export class HostRateLimiter {
 
       if (bucket.tokens >= 1) {
         bucket.tokens -= 1;
-        // Apply micro-jitter (5-15ms) to avoid perfectly periodic bursts
-        const jitter = Math.floor(Math.random() * 10) + 5;
-        await abortableDelay(jitter, signal);
         const actualWaitMs = performance.now() - t0;
         telemetryCollector.recordRateLimitWait(host, actualWaitMs);
         return;
